@@ -12,6 +12,7 @@ Este archivo se actualiza al cerrar cada fase.
 | D1 | Campo de longitud explícito en el marco de registro | sec. 7.3 | F3 | pendiente |
 | D2 | CRC32 con polinomio Castagnoli | sec. 5.1 y 7.3 | F1 / F3 | pendiente |
 | D3 | Los 4 bytes sin nombrar de la cabecera de página son relleno | sec. 5.1 | F1 | **pendiente de decisión** |
+| D4 | El caché del pager no está acotado; la regla de desalojo vive en la escritura | sec. 7.5 | F3 | pendiente |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -105,3 +106,35 @@ formato en disco de la página es de las cosas más caras de cambiar más adelan
 a partir de la F2 habrá páginas escritas con este layout.
 
 **Fase.** F1, antes de cerrarla. Es la fase que fija el formato de la página.
+
+## D4 · El caché del pager no está acotado
+
+**Qué se decidió.** El caché de páginas del pager no tiene tamaño máximo: una página
+entra al leerse o al asignarse y se queda residente. Lo que la libera es el checkpoint,
+no un desalojo por presión de memoria.
+
+La sec. 7.5 habla de "un caché de tamaño acotado" que desaloja, y la regla que enuncia
+--no bajar una página sucia mientras `wal_flushed_lsn < page_lsn`-- está pensada para ese
+desalojo. La regla **sí está implementada**, en `writePage`, que es el único camino por el
+que una página llega a `datos.db`.
+
+**Por qué.** Un caché acotado necesita saber qué páginas están en uso para no desalojar
+una que el árbol tiene en la mano; eso es un contador de fijación (`pin`/`unpin`) en cada
+`Get`, y una API que el `DESIGN.md` no pide y que la F2 puede filtrar en cualquier
+descenso. A cambio no compra nada todavía: sin concurrencia y con un checkpoint que vacía
+el conjunto de sucias, la memoria residente entre checkpoints está acotada por el propio
+intervalo de checkpoint.
+
+Lo que sí importaba era que la regla de la sec. 7.5 no quedara como código muerto hasta el
+día que el caché se acote. Poniéndola en `writePage`, el checkpoint pasa por ella en cada
+corrida --el paso 1 de la sec. 7.4 baja páginas sucias, y si alguna tuviera su `page_lsn`
+por delante de lo sincronizado, esa escritura sería exactamente la que el log no puede
+reparar--. Está probada en `TestReglaDeDesalojo` y `TestWriteAheadIrreparable`.
+
+**Dónde reflejarlo.** Sec. 7.5, precisando que la regla se aplica en toda bajada a
+`datos.db` --checkpoint incluido-- y no solo en el desalojo, y que el caché acotado es una
+posibilidad futura y no una premisa.
+
+**Fase.** F3, junto con el resto del checkpoint. Si en la F4 el arnés necesita forzar
+desalojos para provocar el escenario de la sec. 7.5, es ahí donde el caché se acota y
+aparece la fijación.

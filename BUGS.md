@@ -39,7 +39,8 @@ donde se espera que funcione sin cambios en el código.
 
 ## F1 · Página, pager y contrato
 
-*(fase en curso; esta sección se cierra al terminarla)*
+**Un error, y no en el motor sino en el aparato de verificación.** El formato de página
+y el pager no dieron ningún error de código; el fuzzer sí.
 
 ### El fuzzer se atasca en la minimización con páginas de tamaño fijo
 
@@ -120,3 +121,34 @@ F1, y desde entonces `-fuzz` levanta sus 8 workers sin problema en la misma máq
 Queda como muy probable que la directiva afectara al binario de Go anterior y no al
 patrón de re-ejecución en sí. La corrida de 60 s que la F0 dejó pendiente para CI se
 puede hacer ya en local.
+
+### El pager: ningún error de código detectado, y cómo se comprobó que eso significa algo
+
+El pager (`internal/pager`) pasó su suite en verde en la primera ejecución. Ese es
+justamente el resultado del que hay que desconfiar: un verde a la primera puede querer
+decir que el código está bien o que los tests no comprueban nada, y desde fuera se ven
+igual. Es el riesgo de la sec. 11 -- *"el arnés de pruebas tiene bugs y los verdes no
+significan nada"*.
+
+Se comprobó por mutación: romper a mano cada una de las tres reglas que el pager existe
+para imponer, y verificar que el rojo aparece, que aparece en el test que corresponde, y
+que no aparece en los demás.
+
+| Mutación | Qué se quitó | Resultado |
+|---|---|---|
+| A | El `fsync` de extensión antes del commit (sec. 7.6) | `TestExtensionAntesDelCommit` en rojo, con la traza `[wal:imagen, wal:commit, datos:write, datos:sync]` -- el commit confirmando un grupo que usa una página que el archivo aún no cubre |
+| B | La comprobación `wal_flushed_lsn < page_lsn` de `writePage` (sec. 7.5) | `TestReglaDeDesalojo` y `TestWriteAheadIrreparable` en rojo; la página bajó a `datos.db` sin sincronizar antes el WAL |
+| C | La detección de página obsoleta en `MarkDirty` | `TestPaginaObsoleta` en rojo; ensuciar una copia de una página ya liberada y reciclada pasó sin error |
+
+Cada mutación puso en rojo su test y solo el suyo, y el original quedó restaurado byte a
+byte antes de seguir.
+
+**Lo que hizo posible la mutación A** es que los dobles de prueba -- el `File` en memoria y
+el `Log` instrumentado -- escriben en una **traza compartida**. Con una traza por
+componente, el orden relativo entre `datos.db` y el WAL no se observa, y ese orden
+relativo *es* el write-ahead logging: la mutación A habría pasado en verde. Es la misma
+razón por la que la sec. 9.1 exige un árbitro de orden global entre los dos archivos en la
+F4, aplicada aquí en miniatura.
+
+**Sin semilla que citar:** no hay ningún fallo con una entrada culpable, solo la
+comprobación de que los tests pueden ponerse rojos.

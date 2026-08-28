@@ -11,7 +11,7 @@ Este archivo se actualiza al cerrar cada fase.
 |---|---|---|---|---|
 | D1 | Campo de longitud explícito en el marco de registro | sec. 7.3 | F3 | pendiente |
 | D2 | CRC32 con polinomio Castagnoli | sec. 5.1 y 7.3 | F1 / F3 | pendiente |
-| D3 | Los 4 bytes sin nombrar de la cabecera de página son relleno | sec. 5.1 | F1 | **pendiente de decisión** |
+| D3 | Los 4 bytes sin nombrar de la cabecera de página son relleno | sec. 5.1 | F1 | **decidida**, pendiente de reflejar |
 | D4 | El caché del pager no está acotado; la regla de desalojo vive en la escritura | sec. 7.5 | F3 | pendiente |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
@@ -60,11 +60,15 @@ la F1 si se prefiere no arrastrar la anotación.
 
 ## D3 · Los 4 bytes sin nombrar de la cabecera de página
 
-**A diferencia de D1 y D2, esta entrada no es una decisión tomada: es una discrepancia
-del diseño consigo mismo que hay que resolver.** La implementación de la F1 avanza con
-una interpretación provisional, marcada abajo, hasta que se decida.
+**Estado: decidida.** Son **relleno reservado, siempre a cero**. Queda pendiente
+reflejarlo en la sec. 5.1 del `DESIGN.md`, con el texto que se propone al final de esta
+entrada.
 
-**Qué no cuadra.** La sec. 5.1 declara una cabecera de **40 bytes**, pero los campos que
+A diferencia de D1 y D2, esta entrada no nació como una decisión de implementación sino
+como una discrepancia del diseño consigo mismo. La F1 avanzó con la interpretación de
+abajo como provisional y se cerró confirmándola.
+
+**Qué no cuadraba.** La sec. 5.1 declara una cabecera de **40 bytes**, pero los campos que
 enumera su lista suman **36**:
 
 ```
@@ -77,7 +81,7 @@ Entre la marca 26 y la 32 hay un solo campo dibujado -- `libre` -- ocupando seis
 cuando el texto dice que mide dos. Los 4 bytes que faltan viven ahí, entre el offset 28
 y el 32, y el documento no los nombra.
 
-**Interpretación provisional adoptada.** Los 4 bytes son **relleno reservado**:
+**Layout que se fija:**
 
 ```
 libre_fin  24..26   uint16
@@ -89,23 +93,47 @@ enlace     32..40   uint64
 **Por qué esta y no otra.** Es la única lectura que respeta a la vez las tres cosas que
 el documento sí afirma sin ambigüedad -- cabecera de 40 bytes, `libre_fin` y `libre` de
 2 bytes cada uno, y `enlace` en el offset 32 marcado en el diagrama -- y además deja
-`enlace`, que es un `uint64`, alineado a 8 bytes dentro de la página. Las alternativas
-las rompen: ensanchar `libre` a 6 bytes contradice el texto, y compactar los campos
-contradice el 32 del diagrama y desalinea `enlace`.
+`enlace`, que es un `uint64`, alineado a 8 bytes dentro de la página.
 
-`EncodeTo` escribe esos 4 bytes a cero siempre, en vez de dejar lo que hubiera en el
-buffer reutilizado del pager. Es lo que hace que las páginas escritas hoy tengan un valor
-conocido ahí el día que el relleno se convierta en un campo con significado -- de otro
-modo, ese día habría páginas en disco con basura del marco anterior en un campo que ya
-tendría lectores.
+Se consideraron y se descartaron dos alternativas:
 
-**Qué hay que decidir.** Si el relleno se queda como reservado, la sec. 5.1 debe
-nombrarlo en la lista de campos y marcar el offset 28 en el diagrama. Si en realidad
-faltaba un campo que se perdió al escribir el documento, hay que declararlo ahora: el
-formato en disco de la página es de las cosas más caras de cambiar más adelante, porque
-a partir de la F2 habrá páginas escritas con este layout.
+- **Que los 4 bytes fueran un campo que se perdió al escribir el documento.** El único
+  candidato serio era un contador de *bytes muertos* dejados por las celdas borradas --
+  el `fragmented free bytes` que SQLite sí tiene y esta cabecera no --, para decidir si
+  una página se compacta en vez de dividirse. Se descarta porque ese dato **es
+  derivable**: recorrer el directorio de slots y sumar el tamaño de las celdas da el
+  espacio libre incluida la fragmentación, en ≤200 iteraciones sobre memoria que ya está
+  en el caché, en un proyecto cuya sec. 2 declara que no compite en rendimiento.
+  Persistirlo no cuesta 2 bytes: cuesta **estado redundante que puede discrepar de la
+  verdad**. Un contador desactualizado tras un borrado produce una página que se cree
+  llena estando vacía, y el fallo aparece miles de operaciones después de su causa --
+  el riesgo que la sec. 11 nombra explícitamente.
 
-**Fase.** F1, antes de cerrarla. Es la fase que fija el formato de la página.
+  Es el mismo razonamiento que la sec. 6.1 ya hizo para no persistir el conjunto de
+  libres: reconstruir es O(n), pero a cambio la ventana de inconsistencia desaparece por
+  construcción. Persistir aquí lo que allí se decidió derivar sería contradecir esa
+  decisión en la misma cabecera.
+
+- **Compactar la cabecera a 36 bytes**, con `enlace` en el offset 28. Gana 4 bytes de
+  cuerpo por página, un 0,1%. Cuesta contradecir el offset 32 del diagrama, desalinear un
+  `uint64` dentro de la página, y reescribir la derivación de la sec. 4 (4056/4 pasa a
+  4060/4; el límite sigue dando 1000, pero el texto dejaría de cuadrar). Mal cambio.
+
+**Qué se gana dejándolo reservado.** No es aplazar la decisión. Un campo reservado, a cero
+y **cubierto por el CRC**, es un punto de extensión gratuito: el día que haga falta un
+campo nuevo, todas las páginas escritas hasta entonces tienen ahí un valor conocido. Eso
+es exactamente lo que no se tendría si `EncodeTo` dejara en esos bytes lo que hubiera en
+el marco reutilizado del pager. Lo comprueba `TestRellenoACero`.
+
+**Dónde reflejarlo.** Sec. 5.1: añadir a la lista de campos
+
+> **relleno (4):** reservado, siempre a cero. Está cubierto por el CRC, así que su valor
+> es conocido en toda página escrita con esta versión del formato: el día que se convierta
+> en un campo con significado, no hay páginas antiguas con basura en él.
+
+y marcar el offset 28 en el diagrama, entre `libre` y `enlace`.
+
+**Fase.** F1. Decidida al cerrarla.
 
 ## D4 · El caché del pager no está acotado
 

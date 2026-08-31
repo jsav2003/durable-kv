@@ -39,6 +39,16 @@ var (
 	// [0, NCells); en los Insert es [0, NCells], porque insertar al final es legítimo.
 	ErrOutOfRange = errors.New("node: indice de celda fuera de rango")
 
+	// ErrCannotSplit indica que Split no puede repartir este nodo: el destino no está vacío
+	// o del mismo tipo, o el origen no tiene celdas suficientes para que las dos mitades
+	// queden con al menos una.
+	//
+	// A diferencia de ErrNoSpace, esto no es flujo normal: un nodo llega a Split porque un
+	// Insert devolvió ErrNoSpace, y un nodo que no admite una celda más tiene por fuerza
+	// varias. Si aparece, o el llamador dividió algo que no hacía falta dividir o la página
+	// no es lo que dice ser.
+	ErrCannotSplit = errors.New("node: el nodo no se puede dividir")
+
 	// ErrBadNode indica que el cuerpo de la página no es un nodo coherente: lo devuelve
 	// Check envuelto con el detalle de qué falló.
 	//

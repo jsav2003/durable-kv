@@ -189,6 +189,28 @@ func (n Node) Child(i int) (uint64, error) {
 	return binary.LittleEndian.Uint64(n.p.Body[off+offChild:]), nil
 }
 
+// SetChild cambia el hijo izquierdo de la celda i. Solo en nodos internos.
+//
+// Lo necesita la propagación de una división: cuando el hijo de la celda i se parte en dos,
+// la celda nueva hereda la mitad izquierda y la que ya estaba -- que conserva su clave y
+// pasa a la posición i+1 -- tiene que apuntar a la derecha. Sin este setter esa operación
+// serían un borrado y dos inserciones, y un ErrNoSpace en la segunda dejaría al padre con un
+// separador de menos.
+//
+// No mueve bytes: el puntero mide 8 en los dos casos, así que no puede fallar por espacio ni
+// alterar el layout.
+func (n Node) SetChild(i int, hijo uint64) error {
+	if n.p.Type != page.TypeInternal {
+		return ErrWrongType
+	}
+	if i < 0 || i >= n.NCells() {
+		return ErrOutOfRange
+	}
+	off := idx(n.slot(i))
+	binary.LittleEndian.PutUint64(n.p.Body[off+offChild:], hijo)
+	return nil
+}
+
 // Search hace búsqueda binaria sobre el directorio de slots. Devuelve el índice de la clave
 // si está, y si no el punto donde habría que insertarla -- que es exactamente lo que
 // necesitan tanto InsertHoja como el descenso, y por eso no devuelve solo un booleano.

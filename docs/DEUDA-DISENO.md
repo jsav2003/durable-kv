@@ -16,6 +16,7 @@ Este archivo se actualiza al cerrar cada fase.
 | D5 | El campo `libre` de la cabecera es derivable de `nceldas`: se escribe, no se lee | sec. 5.1 | F2 | **decidida**, pendiente de reflejar |
 | D6 | `Key` y `Value` devuelven subsectores de la página, no copias | — | F3 | **decidida**, obligación pendiente |
 | D7 | La derivación del tope de 1000 bytes no descuenta el directorio de slots | sec. 4 y `NO-GOALS.md` | F2 | **decidida**, pendiente de reflejar |
+| D8 | `Validate()` no comprueba el CRC de las páginas libres | sec. 6 | F3 | **decidida**, obligación pendiente |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -255,3 +256,31 @@ progresar, no como un error de tamaño.
 por celda y dar 4048 / 4 = 1012 como cota. Y el mismo párrafo repetido en `NO-GOALS.md`.
 
 **Fase.** F2. Detectada al implementar el límite.
+
+## D8 · `Validate()` no comprueba el CRC de las páginas libres
+
+**Qué se decidió.** La comprobación del invariante 6 en `internal/tree/validate.go`
+(`particion`) verifica la partición —que toda página de `[2, total_pages)` está en
+exactamente uno de los dos conjuntos— pero **no lee las páginas libres**. La otra mitad de
+lo que pide el invariante queda para la F3.
+
+**Qué dice el invariante.** La sec. 6, invariante 6: *"Toda página de ambos conjuntos tiene
+CRC y `page_id` válidos."* Las alcanzables lo cumplen por construcción, porque el barrido las
+lee con `pager.Get`, que las decodifica con `page.Decode` y verifica las dos cosas. Las
+libres no las lee nadie.
+
+**Por qué no se puede comprobar todavía.** En la F2 una página puede asignarse y liberarse
+sin llegar nunca a `datos.db`: `pager.Alloc` la crea en memoria y `pager.Free` la saca del
+caché y del conjunto de sucias, así que su ranura en el archivo sigue a ceros. Un CRC de
+ceros es inválido. Leer las libres en `Validate()` hoy pondría en rojo un árbol perfectamente
+sano, y esa es la clase de falso positivo que la sec. 6 declara inaceptable para la F4 al
+argumentar por qué el 40% de ocupación deja de ser invariante.
+
+Esa mitad del invariante solo tiene sentido cuando el checkpoint ha materializado el archivo
+entero, que es la sec. 7.4 y por tanto la F3.
+
+**Qué falta hacer en la F3.** Extender `particion` para leer cada página libre y exigir CRC y
+`page_id` válidos, y llamarla desde la recuperación (sec. 8) donde la precondición sí se
+cumple. El comentario de `particion` ya nombra esta deuda.
+
+**Fase.** F3. Detectada al escribir `Validate()` en la F2.

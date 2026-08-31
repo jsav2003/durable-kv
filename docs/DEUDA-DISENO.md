@@ -13,6 +13,9 @@ Este archivo se actualiza al cerrar cada fase.
 | D2 | CRC32 con polinomio Castagnoli | sec. 5.1 y 7.3 | F1 / F3 | pendiente |
 | D3 | Los 4 bytes sin nombrar de la cabecera de página son relleno | sec. 5.1 | F1 | **decidida**, pendiente de reflejar |
 | D4 | El caché del pager no está acotado; la regla de desalojo vive en la escritura | sec. 7.5 | F3 | pendiente |
+| D5 | El campo `libre` de la cabecera es derivable de `nceldas`: se escribe, no se lee | sec. 5.1 | F2 | **decidida**, pendiente de reflejar |
+| D6 | `Key` y `Value` devuelven subsectores de la página, no copias | — | F3 | **decidida**, obligación pendiente |
+| D7 | La derivación del tope de 1000 bytes no descuenta el directorio de slots | sec. 4 y `NO-GOALS.md` | F2 | **decidida**, pendiente de reflejar |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -166,3 +169,89 @@ posibilidad futura y no una premisa.
 **Fase.** F3, junto con el resto del checkpoint. Si en la F4 el arnés necesita forzar
 desalojos para provocar el escenario de la sec. 7.5, es ahí donde el caché se acota y
 aparece la fijación.
+
+## D5 · El campo `libre` de la cabecera es derivable de `nceldas`
+
+**Qué se decidió.** El área de slots empieza en el offset 40 y ocupa 2 bytes por celda, así
+que `libre` es **siempre** `HeaderSize + 2·nceldas`. `internal/node` lo escribe porque el
+formato de la sec. 5.1 lo declara, pero no lo lee nunca como fuente de verdad: lo deriva al
+mutar (`syncFree`) y contrasta las dos cuentas al validar (`Check`). Una página cuyo `libre`
+discrepe de su `nceldas` es un nodo mal formado, no una página con otra disposición.
+
+**Por qué.** Es el razonamiento de D3 aplicado al campo de al lado. Un segundo lugar donde
+vive el mismo dato es un lugar donde el dato puede discrepar, y una discrepancia aquí no da
+un error: da una página que se cree más llena o más vacía de lo que está, y el fallo aparece
+miles de operaciones después de su causa —el riesgo que la sec. 11 nombra—. Derivarlo cuesta
+una suma; leerlo cuesta tener que mantenerlo correcto en cada uno de los caminos de mutación
+para siempre.
+
+No se elimina del formato, y esto es deliberado: quitarlo obligaría a mover `libre_fin`, a
+contradecir el diagrama de la sec. 5.1 y a reescribir la aritmética de la sec. 4, que es
+exactamente el mal cambio que D3 ya descartó para los 4 bytes de relleno. Un campo redundante
+pero verificado es barato; un cambio de layout no lo es.
+
+Lo comprueban `TestLibreEsDerivable` y el caso `libre desincronizado de nceldas` de
+`TestCheckDetectaCorrupcion`.
+
+**Dónde reflejarlo.** Sec. 5.1, en la descripción de `libre_fin (2), libre (2)`: precisar que
+`libre` es el final del directorio de slots, que se deriva de `nceldas`, y que su
+discrepancia es una comprobación de integridad y no una variante válida del formato.
+
+**Fase.** F2. Decidida al escribir la capa de celdas.
+
+## D6 · `Key` y `Value` devuelven subsectores de la página, no copias
+
+**Qué se decidió.** Los accesores de `internal/node` devuelven slices que apuntan al cuerpo
+de la página. Son válidos hasta la siguiente mutación de ese nodo. Quien necesite conservar
+una clave o un valor más allá de ese punto, copia.
+
+**Por qué.** Cada nivel de cada descenso hace del orden de ocho comparaciones de clave, y
+copiar en el accesor pondría una asignación en cada una: una asignación por comparación, no
+por operación. La página ya paga exactamente una copia, al decodificarse
+(`internal/page/page.go`, `Decode`), y esa es la que garantiza que el nodo no aliase el buffer
+de E/S reutilizado del pager. Pagarla otra vez aquí no compra ninguna garantía nueva.
+
+**Qué obliga.** El `Get` público de la sec. 4 devuelve `[]byte` al llamador, que lo conservará
+todo lo que quiera. **Ese `Get` tiene que copiar antes de devolver.** Si no lo hace, un `Put`
+posterior sobre la misma página le cambia el valor bajo los pies a quien ya lo tenía, y el
+motor devuelve datos que nadie escribió sin que ninguna comprobación de integridad se entere:
+la página es coherente, el CRC es correcto, y el error está en el pasado del llamador.
+
+Esta entrada existe por eso. No hay nada que corregir en el `DESIGN.md` —es una decisión de
+implementación que el documento no contradice—, pero es una obligación que cruza de fase y
+que en la F3 no tendría de dónde deducirse.
+
+**Dónde reflejarlo.** En ningún sitio del `DESIGN.md`. Se cierra cuando el `Get` de la F3
+copie y su test lo compruebe: mutar la página después de un `Get` y exigir que el valor
+devuelto no cambie.
+
+**Fase.** F3.
+
+## D7 · La derivación del tope de 1000 bytes no descuenta el directorio de slots
+
+**Qué se decidió.** El tope de la sec. 4 —`clave + valor + 6 ≤ 1000`— **se mantiene tal cual**.
+Lo que hay que corregir es la aritmética con la que el documento lo justifica, no el número.
+
+**Qué no cuadra.** La sec. 4 (y `NO-GOALS.md`, que la repite) razonan así: hacen falta al
+menos cuatro celdas por página para que una hoja llena se pueda dividir en dos mitades
+razonables; 4096 − 40 = 4056 bytes útiles; 4056 / 4 ≈ 1014; de ahí el tope de 1000.
+
+El paso de los 4056 bytes útiles ignora el directorio de slots, que son 2 bytes por celda
+(sec. 5.1). Con cuatro celdas hay cuatro slots, así que el espacio real para las celdas es
+4056 − 8 = 4048, y 4048 / 4 = **1012**, no 1014.
+
+**Por qué el número no cambia.** El tope de 1000 sigue por debajo de 1012 con 12 bytes de
+holgura por celda, así que la propiedad que el número persigue —que cuatro celdas del tamaño
+máximo quepan en una página— se sostiene. Lo comprueba `TestCuatroCeldasDeMilBytes`, que mete
+las cuatro y registra cuánto sobra. Corregir la aritmética a la baja tampoco cambiaría el
+tope: 1000 es un número redondo elegido por debajo de la cota, y sigue estándolo.
+
+Se anota igualmente porque una derivación que no cuadra invita a que alguien la rehaga mal.
+Si un día se sube el tope apoyándose en el 1014 del documento, el resultado es una página
+donde la cuarta celda no entra —y el fallo aparecería como una división que no puede
+progresar, no como un error de tamaño.
+
+**Dónde reflejarlo.** Sec. 4, en el párrafo de la derivación: descontar los 2 bytes de slot
+por celda y dar 4048 / 4 = 1012 como cota. Y el mismo párrafo repetido en `NO-GOALS.md`.
+
+**Fase.** F2. Detectada al implementar el límite.

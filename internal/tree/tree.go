@@ -79,14 +79,22 @@ func (t *Tree) nodo(id uint64) (node.Node, error) {
 // clave que además es separadora se buscaría en el subárbol donde el invariante 4 garantiza
 // que no está, y Get devolvería ErrNotFound sobre una clave presente.
 func hijo(n node.Node, key []byte) (uint64, error) {
-	i, hit := n.Search(key)
-	if hit {
-		i++
-	}
+	i := indiceDeHijo(n, key)
 	if i == n.NCells() {
 		return n.Link(), nil
 	}
 	return n.Child(i)
+}
+
+// indiceDeHijo es la posición del hijo por el que baja key, en la numeración donde NCells()
+// es el enlace derecho. La propagación de una división lo recalcula para saber en qué
+// posición del padre estaba el hijo que se partió.
+func indiceDeHijo(n node.Node, key []byte) int {
+	i, hit := n.Search(key)
+	if hit {
+		i++
+	}
+	return i
 }
 
 // primerHijo es el hijo más a la izquierda, por el que baja un Scan sin cota inferior.

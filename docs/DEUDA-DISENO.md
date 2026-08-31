@@ -17,6 +17,7 @@ Este archivo se actualiza al cerrar cada fase.
 | D6 | `Key` y `Value` devuelven subsectores de la página, no copias | — | F3 | **decidida**, obligación pendiente |
 | D7 | La derivación del tope de 1000 bytes no descuenta el directorio de slots | sec. 4 y `NO-GOALS.md` | F2 | **decidida**, pendiente de reflejar |
 | D8 | `Validate()` no comprueba el CRC de las páginas libres | sec. 6 | F3 | **decidida**, obligación pendiente |
+| D9 | Un `Put` que falla a medias deja el grupo abierto: no hay camino de aborto | sec. 7.3 | F3 | **decidida**, obligación pendiente |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -284,3 +285,36 @@ entero, que es la sec. 7.4 y por tanto la F3.
 cumple. El comentario de `particion` ya nombra esta deuda.
 
 **Fase.** F3. Detectada al escribir `Validate()` en la F2.
+
+## D9 · Un `Put` que falla a medias deja el grupo de commit abierto
+
+**Qué se decidió.** `tree.Put` abre el grupo con `pager.BeginGroup` y lo cierra con
+`CommitGroup`. Si algo falla entre medias, **el grupo se queda abierto** y toda operación
+posterior falla con `ErrGroupOpen` o `ErrNoGroup`. No hay `AbortGroup`.
+
+**Por qué no lo hay.** El contrato del pager que la sec. 10 manda cerrar en la F1 enumera
+cinco operaciones —`alloc`, `get`, `markDirty`, `beginGroup`, `commitGroup`— y ninguna es un
+aborto. Añadirlo ahora sería abrir un contrato que el diseño declara cerrado, y hacerlo para
+resolver un caso que en la F2 no puede alcanzarse por un error del llamador: los límites de
+tamaño de la sec. 4 se comprueban **antes** de abrir el grupo, precisamente para eso, y lo
+fija `TestPutRechazaTamanosSinEnvenenarElPager`.
+
+Lo que queda como fuente de error dentro del grupo es una página que no es lo que dice ser:
+CRC malo, `page_id` que no corresponde, un cuerpo que `node.Check` rechazaría. Con esa clase
+de fallo el árbol en memoria ya está a medias, y sin log no hay forma de deshacerlo: las
+páginas mutadas están en el caché del pager y el estado anterior no existe en ninguna parte.
+Un pager que se niega a seguir es entonces más honesto que uno que continúa sobre una
+estructura rota.
+
+**Por qué esto no es el mecanismo de atomicidad.** La atomicidad del `Put` no depende de este
+camino sino del grupo de commit de la sec. 7.3: un grupo sin registro de commit no se
+reaplica en la recuperación, así que en disco el `Put` a medias no existe. Lo que falta es
+solo la recuperación **en memoria**, y esa necesita el WAL para volver a leer las páginas
+buenas.
+
+**Qué falta hacer en la F3.** Cuando el WAL exista, el aborto es releer del log las páginas
+del grupo o descartarlas del caché para que el siguiente `Get` las traiga de `datos.db`.
+Entonces sí tiene sentido añadir la operación al pager, con el estado anterior recuperable
+detrás.
+
+**Fase.** F3. Detectada al implementar `Put` en la F2.

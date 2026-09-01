@@ -18,6 +18,7 @@ Este archivo se actualiza al cerrar cada fase.
 | D7 | La derivación del tope de 1000 bytes no descuenta el directorio de slots | sec. 4 y `NO-GOALS.md` | F2 | **decidida**, pendiente de reflejar |
 | D8 | `Validate()` no comprueba el CRC de las páginas libres | sec. 6 | F3 | **decidida**, obligación pendiente |
 | D9 | Un `Put` que falla a medias deja el grupo abierto: no hay camino de aborto | sec. 7.3 | F3 | **decidida**, obligación pendiente |
+| D10 | El `fsync` de directorio no existe en Windows: no-op documentado | sec. 7.4 | F3 | **decidida**, limitación permanente |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -318,3 +319,40 @@ Entonces sí tiene sentido añadir la operación al pager, con el estado anterio
 detrás.
 
 **Fase.** F3. Detectada al implementar `Put` en la F2.
+
+## D10 · El `fsync` de directorio es un no-op en Windows
+
+**Qué se decidió.** El sync de directorio pasa por `fsx.Dir.Sync()`. En Unix hace el
+`fsync` de verdad sobre el directorio; en **Windows no hace nada y devuelve `nil`**.
+
+**Por qué.** La sec. 7.4 exige `fsync` de directorio tras crear, rotar o borrar un
+archivo, y da la razón: sin él, en ext4/XFS la creación del WAL puede no ser duradera —
+`Put` devolvería `nil` y tras la caída el archivo de log no existiría.
+
+Windows no ofrece esa operación. `FlushFileBuffers` exige un handle con permiso de
+escritura y un handle de directorio no lo admite: la llamada devuelve
+`ERROR_ACCESS_DENIED`. No hay equivalente en la API Win32, así que no es cuestión de dar
+con la llamada correcta — la garantía no está disponible en la plataforma.
+
+Se descartó *intentarlo y tragarse el error*, que da el mismo efecto práctico pero deja el
+camino de fallo indistinguible de un error de E/S real: el día que el `fsync` de
+directorio falle en Linux por una razón de verdad, ese código lo ignoraría igual.
+
+**Qué se pierde, concretamente.** En Windows, una caída inmediatamente posterior a una
+rotación puede dejar sin materializar la entrada de directorio del WAL nuevo. Lo
+confirmado sigue a salvo: el checkpoint que provocó la rotación ya hizo `fsync` de
+`datos.db` (paso 2) y de la meta (paso 4), así que lo que puede faltar es un archivo de
+log **vacío**, que la reapertura vuelve a crear. La pérdida sería real en el caso inverso
+—un WAL viejo que se creía borrado y sigue ahí—, y contra eso las defensas 1 y 2 de la
+sec. 7.4 (LSN monótono con contigüidad, y `epoca` verificada) siguen operativas en las dos
+plataformas. Son tres defensas precisamente para que ninguna sea la única.
+
+**Dónde se ejercita el camino real.** En el CI de Linux de la F6. El disco falso de la F4
+modela la operación igual en las dos plataformas, así que los tests de orden no dependen
+de en cuál se corran.
+
+**Dónde reflejarlo.** Sec. 7.4, en el párrafo del `fsync` de directorio: nombrar que la
+operación no existe en Windows y que allí las defensas 1 y 2 son las que sostienen la
+regla del primer CRC inválido.
+
+**Fase.** F3. Detectada al escribir `internal/fsx`.

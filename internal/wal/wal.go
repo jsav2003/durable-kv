@@ -1,7 +1,8 @@
 package wal
 
 import (
-	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
 	"github.com/jsav2003/motor-almacenamiento/internal/page"
@@ -9,12 +10,34 @@ import (
 	"github.com/jsav2003/motor-almacenamiento/internal/record"
 )
 
+// prefijo es la parte fija del nombre de un archivo de log.
+const prefijo = "datos.wal."
+
 // Nombre es el del archivo de log de una generación (DESIGN.md sec. 5). La generación va
 // en el nombre porque el WAL no se trunca en sitio, se rota: escribir registros nuevos
 // encima de bytes de registros viejos es la causa de una clase entera de bugs de
 // recuperación.
 func Nombre(epoca uint32) string {
-	return fmt.Sprintf("datos.wal.%d", epoca)
+	return prefijo + strconv.FormatUint(uint64(epoca), 10)
+}
+
+// Generacion es la inversa de Nombre: devuelve la generación que nombra un archivo, y
+// false si el nombre no es el de un log.
+//
+// Existe porque con las dos metas inválidas el nombre del archivo es lo único que lleva la
+// generación (sec. 8, paso 1), y porque una caída en mitad de una rotación puede dejar dos
+// generaciones en el directorio. Vive aquí, pegada a Nombre, para que la convención esté en
+// un solo sitio: dos sitios que la conocen son dos sitios que pueden discrepar.
+func Generacion(nombre string) (uint32, bool) {
+	resto, ok := strings.CutPrefix(nombre, prefijo)
+	if !ok {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(resto, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(v), true
 }
 
 // WAL es el write-ahead log abierto para escritura. Implementa pager.Log, cuya firma

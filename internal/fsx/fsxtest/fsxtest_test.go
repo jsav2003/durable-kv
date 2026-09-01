@@ -81,8 +81,8 @@ func TestTruncateEnAmbasDirecciones(t *testing.T) {
 
 	f.WriteAt([]byte("abcdef"), 0)
 	f.Truncate(3)
-	if a.Tamano() != 3 {
-		t.Fatalf("tamano = %d, quiero 3", a.Tamano())
+	if n, _ := a.Size(); n != 3 {
+		t.Fatalf("tamano = %d, quiero 3", n)
 	}
 	f.Truncate(5)
 	if got := d.Bytes("f"); string(got) != "abc\x00\x00" {

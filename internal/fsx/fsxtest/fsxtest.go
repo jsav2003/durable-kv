@@ -117,6 +117,11 @@ func (d *Disco) Nombres() []string {
 	return slices.Sorted(maps.Keys(d.archivos))
 }
 
+// Listar es Nombres con la firma de fsx.Dir.
+func (d *Disco) Listar() ([]string, error) {
+	return d.Nombres(), nil
+}
+
 // Bytes devuelve el contenido de un archivo, o nil si no existe.
 func (d *Disco) Bytes(nombre string) []byte {
 	a, ok := d.archivos[nombre]
@@ -192,8 +197,8 @@ func (a *Archivo) Close() error {
 	return nil
 }
 
-// Tamano es el tamaño actual del archivo.
-func (a *Archivo) Tamano() int64 { return int64(len(a.datos)) }
+// Size es el tamaño actual del archivo.
+func (a *Archivo) Size() (int64, error) { return int64(len(a.datos)), nil }
 
 var (
 	_ fsx.Dir  = (*Disco)(nil)

@@ -17,13 +17,17 @@ package fsx
 // que un File satisface también las interfaces homónimas de internal/record y de
 // internal/pager sin conversión.
 //
-// Close no está en la de la sec. 9.1 porque allí no hacía falta: el WAL sí lo necesita,
-// porque la rotación deja atrás un archivo que hay que cerrar antes de borrarlo.
+// Close y Size no están en la de la sec. 9.1 porque allí no hacían falta. Close lo
+// necesita el WAL, porque la rotación deja atrás un archivo que hay que cerrar antes de
+// borrarlo. Size lo necesita la recuperación: el paso 5 de la sec. 8 extiende datos.db con
+// páginas cero **explícitas**, y para saber desde dónde escribirlas hay que saber hasta
+// dónde llega el archivo.
 type File interface {
 	ReadAt(p []byte, off int64) (int, error)
 	WriteAt(p []byte, off int64) (int, error)
 	Sync() error
 	Truncate(size int64) error
+	Size() (int64, error)
 	Close() error
 }
 
@@ -35,6 +39,14 @@ type Dir interface {
 
 	// Remove borra el archivo nombre.
 	Remove(nombre string) error
+
+	// Listar devuelve los nombres de los archivos del directorio.
+	//
+	// Lo necesita el paso 1 de la sec. 8 en su caso extremo: con las dos metas inválidas no
+	// hay de dónde sacar qué generación del WAL buscar, y el nombre del archivo es lo único
+	// que la lleva. Sirve además para barrer las generaciones huérfanas que deja una caída
+	// en mitad de una rotación.
+	Listar() ([]string, error)
 
 	// Sync hace fsync sobre el directorio: es lo que hace duradera la *creación* o el
 	// *borrado* de un archivo, no su contenido.

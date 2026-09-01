@@ -48,6 +48,15 @@ type Grupo struct {
 // de recuperación, y un escritor que reanudara más allá los daría por buenos en la
 // siguiente caída.
 //
+// desdeLSN es el LSN tras el que debe empezar el log: normalmente el del último
+// checkpoint, que sale de la meta. **Un desdeLSN de 0 significa "no hay referencia"**, y
+// entonces la contigüidad se ancla en el LSN del primer registro en vez de exigir que sea
+// el 1. Los dos casos coinciden en la generación 0, donde el primer registro es el LSN 1;
+// la distinción importa cuando las dos metas fallaron y hay que reproducir un log de una
+// generación posterior, cuyo primer LSN es alto porque el LSN nunca se reinicia. Exigir el
+// 1 ahí descartaría el log entero -- y con las metas rotas, ese log es la única verdad que
+// queda.
+//
 // El error nunca es nil: describe por qué terminó la lectura, y io.EOF es el final limpio.
 // EsFinDeLog lo clasifica.
 func Leer(f fsx.File, epoca uint32, desdeLSN uint64) ([]Grupo, int64, error) {
@@ -55,6 +64,7 @@ func Leer(f fsx.File, epoca uint32, desdeLSN uint64) ([]Grupo, int64, error) {
 		grupos   []Grupo
 		abierto  []*page.Page
 		esperado = desdeLSN + 1
+		anclado  = desdeLSN != 0
 		fin      int64
 		r        = record.NewReader(f, 0)
 	)
@@ -63,6 +73,9 @@ func Leer(f fsx.File, epoca uint32, desdeLSN uint64) ([]Grupo, int64, error) {
 		rec, err := r.Next()
 		if err != nil {
 			return grupos, fin, err
+		}
+		if !anclado {
+			esperado, anclado = rec.LSN, true
 		}
 		// Contigüidad y época se comprueban antes de mirar la carga: un registro que no
 		// pertenece a esta secuencia no merece que se interprete su contenido.

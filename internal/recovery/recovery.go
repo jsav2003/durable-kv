@@ -19,7 +19,9 @@
 package recovery
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 
@@ -236,7 +238,15 @@ func Recuperar(dir fsx.Dir, umbral int64) (*Estado, error) {
 	}
 
 	// --- Paso 9: los seis invariantes ---
+	//
 	if err := arbol.Validate(); err != nil {
+		log.Close()
+		return nil, err
+	}
+	// Y la otra mitad del invariante 6, la que Validate no puede comprobar por su cuenta:
+	// que también las páginas **libres** sean legibles. Aquí, y solo aquí, se cumple su
+	// precondición -- los pasos 5 y 6 acaban de materializar el archivo entero.
+	if err := comprobarLibres(datos, pg.FreePages()); err != nil {
 		log.Close()
 		return nil, err
 	}
@@ -263,6 +273,53 @@ func Recuperar(dir fsx.Dir, umbral int64) (*Estado, error) {
 	return &Estado{
 		Datos: datos, Pager: pg, Arbol: arbol, Log: log, Checkpoint: cp, Informe: inf,
 	}, nil
+}
+
+// comprobarLibres es la mitad del invariante 6 que el barrido del árbol no cubre: *"toda
+// página de **ambos** conjuntos tiene CRC y page_id válidos"* (sec. 6). Las alcanzables lo
+// cumplen por construcción, porque Validate las lee con pager.Get; las libres no las lee
+// nadie.
+//
+// Vive aquí y no en internal/tree por dos razones. La precondición --archivo materializado
+// entero-- solo se cumple en este punto de la recuperación. Y leer la ranura en crudo, sin
+// pasar por pager.Get, evita meter en el caché del pager páginas que nadie va a usar.
+//
+// # La ranura a ceros, y por qué se acepta
+//
+// Una página libre puede ser legítimamente **todo ceros**, y un CRC de ceros es inválido. Es
+// la ranura que materializó una extensión del archivo y que ninguna imagen describe: la sec.
+// 7.6 dice que crecer datos.db es una operación de metadatos que no describe ninguna imagen
+// de página, y el paso 5 de la sec. 8 la materializa con páginas cero **explícitas**. Esa
+// ranura está en el conjunto de libres y no tiene CRC válido, así que el invariante 6 tal
+// como está redactado en la sec. 6 no puede ser cierto para ella.
+//
+// Lo que el invariante persigue sí se conserva: que una página libre no sea basura ilegible
+// que un día se recicle y pase por datos. Una ranura a ceros no es basura, es un valor
+// conocido y deliberado -- el mismo argumento que D3 hace para los 4 bytes de relleno de la
+// cabecera. Y al reciclarse, pager.Alloc entrega una página nueva a ceros de todas formas,
+// así que su contenido anterior no llega a leerse nunca.
+//
+// Lo que sí queda fuera: una escritura desgarrada que dejara la ranura entera a ceros sería
+// indistinguible de esto. Es una franja estrecha y el precio de no tener un tipo de página
+// para las libres, que el formato de la sec. 5.1 no define.
+func comprobarLibres(f fsx.File, libres []uint64) error {
+	if len(libres) == 0 {
+		return nil
+	}
+	buf := make([]byte, page.Size)
+	ceros := make([]byte, page.Size)
+	for _, id := range libres {
+		if _, err := f.ReadAt(buf, int64(id)*page.Size); err != nil {
+			return fmt.Errorf("%w: la pagina libre %d no se puede leer: %w", ErrLibreIlegible, id, err)
+		}
+		if bytes.Equal(buf, ceros) {
+			continue
+		}
+		if _, err := page.Decode(buf, id); err != nil {
+			return fmt.Errorf("%w: la pagina libre %d: %w", ErrLibreIlegible, id, err)
+		}
+	}
+	return nil
 }
 
 // epocaActual decide en qué generación seguirá escribiendo el log. Con meta válida, la que

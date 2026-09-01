@@ -607,3 +607,133 @@ func TestReaperturaLimpiaNoReproduceNada(t *testing.T) {
 	}
 	exige(t, est2.Arbol, 0, 80)
 }
+
+// Lo que TestCaidaYReapertura no puede probar, probado aquí.
+//
+// Un kill -9 no distingue "hubo fsync" de "no lo hubo": el caché del sistema operativo
+// sobrevive a la muerte del proceso, así que los bytes llegan al disco de todas formas y el
+// motor recupera igual. Quitarle el fsync al commit del WAL no pone en rojo la prueba de
+// caída. Lo que sí lo distingue es el **orden de las llamadas**, y eso la traza compartida
+// lo ve: Put no puede devolver nil sin que su registro de commit haya pasado por el fsync
+// del log.
+//
+// Es la mitad de la sec. 7.2 que se puede afirmar sin disco falso. La otra mitad -- que el
+// fsync sirva de algo, es decir, que el disco no reordene ni descarte -- es la F4.
+func TestPutNoDevuelveSinElFsyncDelLog(t *testing.T) {
+	d := fsxtest.Nuevo()
+	est := recupera(t, d)
+	nombre := wal.Nombre(est.Log.Epoca())
+	d.Traza.Limpia()
+
+	if err := est.Arbol.Put(clave(1), valor(1)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	eventos := d.Traza.Eventos()
+	ultimaEscritura, sync := -1, -1
+	for i, e := range eventos {
+		if strings.HasPrefix(e, nombre+":write ") {
+			ultimaEscritura = i
+		}
+		if e == nombre+":sync" {
+			sync = i
+		}
+	}
+	if ultimaEscritura < 0 {
+		t.Fatalf("el Put no escribio nada en el log: %q", eventos)
+	}
+	if sync < 0 {
+		t.Fatalf("el Put devolvio nil sin fsync del log: %q", eventos)
+	}
+	if sync < ultimaEscritura {
+		t.Errorf("el fsync (%d) precede a la ultima escritura del grupo (%d): %q",
+			sync, ultimaEscritura, eventos)
+	}
+	// Y nada bajó a datos.db en el camino: el dato está a salvo por estar en el log, no por
+	// estar en su sitio definitivo (sec. 7.2, el paso 6 antes del 7).
+	for _, e := range eventos {
+		if strings.HasPrefix(e, recovery.NombreDatos+":write ") {
+			t.Errorf("el Put escribio en datos.db: %q", eventos)
+			break
+		}
+	}
+}
+
+// --- Invariante 6, la mitad de las páginas libres (D8) --------------------------------
+
+// extiendeSinImagenes anexa al log un grupo sin imágenes que solo confirma una extensión del
+// archivo. Es la forma que tiene en el log una operación de metadatos (sec. 7.6), y deja
+// páginas en el conjunto de libres, que es lo que hace falta para probar la comprobación.
+func extiendeSinImagenes(t *testing.T, d *fsxtest.Disco, est *recovery.Estado, n uint64) uint64 {
+	t.Helper()
+	total := est.Pager.TotalPages() + n
+	f, _ := d.Open(wal.Nombre(est.Log.Epoca()))
+	tam, _ := f.Size()
+	err := record.NewWriter(f, tam).Append(record.Record{
+		LSN:   est.Log.LSN() + 1,
+		Type:  wal.TipoCommit,
+		Epoch: est.Log.Epoca(),
+		Payload: wal.CodificaCommit(0, pager.State{
+			RootID: est.Arbol.Root(), TotalPages: total,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return est.Pager.TotalPages()
+}
+
+// Una ranura libre a ceros es legítima: es la que materializó una extensión que ninguna
+// imagen describe. Un CRC de ceros es inválido, así que exigirlo sin más pondría en rojo un
+// árbol sano -- justo el falso positivo que la sec. 6 declara inaceptable.
+func TestUnaPaginaLibreACerosEsLegitima(t *testing.T) {
+	d := fsxtest.Nuevo()
+	est := recupera(t, d)
+	pon(t, est.Arbol, 0, 40)
+	primeraLibre := extiendeSinImagenes(t, d, est, 5)
+
+	est2 := recupera(t, d)
+	libres := est2.Pager.FreePages()
+	if len(libres) != 5 {
+		t.Fatalf("paginas libres = %v, quiero 5 desde la %d", libres, primeraLibre)
+	}
+	exige(t, est2.Arbol, 0, 40)
+}
+
+// Y una que no es ni una página íntegra ni una ranura a ceros sí es un fallo: es basura
+// ilegible en un sitio del que un día se sacará una página.
+func TestUnaPaginaLibreIlegibleSeDetecta(t *testing.T) {
+	casos := map[string]func(buf []byte, id uint64){
+		"basura con crc malo": func(buf []byte, _ uint64) {
+			for i := range buf {
+				buf[i] = byte(i%251 + 1)
+			}
+		},
+		"una pagina integra de otra ranura": func(buf []byte, id uint64) {
+			p := page.New(id+1, page.TypeLeaf)
+			if err := p.EncodeTo(buf); err != nil {
+				panic(err)
+			}
+		},
+	}
+	for nombre, romper := range casos {
+		t.Run(nombre, func(t *testing.T) {
+			d := fsxtest.Nuevo()
+			est := recupera(t, d)
+			pon(t, est.Arbol, 0, 40)
+			libre := extiendeSinImagenes(t, d, est, 5)
+
+			datos, _ := d.Open(recovery.NombreDatos)
+			buf := make([]byte, page.Size)
+			romper(buf, libre)
+			if _, err := datos.WriteAt(buf, int64(libre)*page.Size); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := recovery.Recuperar(d, 0)
+			if !errors.Is(err, recovery.ErrLibreIlegible) {
+				t.Fatalf("Recuperar = %v, quiero ErrLibreIlegible", err)
+			}
+		})
+	}
+}

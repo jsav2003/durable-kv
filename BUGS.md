@@ -302,3 +302,220 @@ El borrado con redistribución y fusión queda fuera de la F2, que es lo que la 
 sec. 10 pide literalmente. El invariante 3 se comprueba en cada `Validate()`, pero la fusión
 no se ejercita nunca, y el conjunto de páginas libres se recorre siempre vacío salvo en
 `TestReconstruirLibres`. Todo lo que la F2 demuestra es sobre **un árbol que solo crece**.
+
+## F3 · WAL y recuperación
+
+Cero errores de código del motor detectados en esta fase, y como en la F1 eso solo significa
+algo si se dice cómo se comprobó. Lo que sí apareció fueron **cuatro errores en el aparato
+de verificación**: tres tests que pasaban sin probar lo que decían y un bug real en el arnés
+de la prueba de caída. La sec. 11 lo dice con todas las letras —"el arnés de pruebas tiene
+bugs y los verdes no significan nada"— y en esta fase esa fila del riesgo se cobró todo lo
+que se cobró.
+
+El método fue el mismo de la F2: **verificación por mutación**. Se rompe el motor a propósito
+de una forma concreta y se exige que un test se ponga en rojo. Un test que sigue en verde con
+el motor roto no es un test.
+
+### Las ocho mutaciones, y las cuatro que no se cazaron a la primera
+
+| # | Mutación | ¿La cazó un test? |
+|---|---|---|
+| 1 | El checkpoint rota el log antes de bajar las páginas sucias | sí, orden de la traza |
+| 2 | La meta no alterna de ranura entre checkpoints | sí |
+| 3 | La meta guarda la época actual en vez de la N+1 | sí |
+| 4 | La recuperación toma el `root_id` de la meta y no del último commit | sí, cinco tests |
+| 5 | La recuperación se salta el checkpoint del paso 10 | sí, cinco tests |
+| 6 | La recuperación no extiende el archivo (paso 5) | **no** |
+| 7 | La recuperación no barre las generaciones huérfanas | **no** |
+| 8 | `Get` no copia el valor antes de devolverlo (D6) | **no** |
+
+Y una novena, aparte, que se comenta en su propia sección: quitarle el `fsync` al commit del
+WAL.
+
+### El test de la extensión (mutación 6): el disco falso no puede tener agujeros
+
+El test truncaba `datos.db` a dos páginas y exigía
+que tras recuperar el archivo midiera lo que `total_pages` promete. Pasaba con y sin el paso
+5, por dos razones que se suman:
+
+1. El `WriteAt` del disco en memoria **rellena de ceros** al escribir más allá del final. No
+   puede producir un archivo disperso, así que el contenido resultante es el mismo con
+   extensión y sin ella. Un disco real no se comporta así, y ese es justo el fallo que el
+   paso 5 existe para evitar.
+2. Sin checkpoint por medio, **toda** página asignada tiene su imagen en el log, así que el
+   paso 6 acaba escribiendo exactamente las mismas páginas que habría escrito el paso 5.
+
+Se reconstruyó sobre el caso que el paso 5 existe para cubrir, y que es el de la sec. 7.6:
+un registro de commit que sube `total_pages` **sin traer ninguna imagen**, porque crecer el
+archivo es una operación de metadatos que ninguna imagen describe. Ahí sí hay páginas que
+solo el paso 5 puede materializar, y sin él el archivo se queda corto de forma observable.
+Es `TestElArchivoSeExtiendeHastaElTotalPagesConfirmado`. Con la mutación puesta:
+
+```
+datos.db mide 12288 bytes y total_pages es 13: quedan 10 paginas sin materializar,
+que en disco real son un agujero disperso
+```
+
+El segundo test que quedó, `TestLasPaginasDelHuecoSeEscribenAntesDeAplicarImagenes`, afirma
+lo otro que el paso 5 promete y que sí se puede observar en memoria: que las páginas del
+hueco se escriben **explícitamente** y se sincronizan antes de aplicar ninguna imagen.
+
+### El test de la generación huérfana (mutación 7): la huérfana es la vieja, no la nueva
+
+El test creaba una generación `N+1` y comprobaba que la recuperación la limpiaba. No limpiaba
+nada, porque esa generación no sobra: es a la que la recuperación va a rotar.
+
+Una caída en mitad de una rotación deja siempre la **anterior** sin borrar. `Rotar` crea la
+`N+1`, hace `fsync` del directorio y solo entonces borra la `N`; la meta, escrita antes de
+rotar, ya apunta a la `N+1`. Así que el estado a reproducir es "existen la `N` y la `N+1`, y
+la meta dice `N+1`". Con la huérfana puesta en el sitio correcto, quitar el barrido pone el
+test en rojo.
+
+### El test de D6 (mutación 8): hace falta forzar una compactación
+
+`TestGetDevuelveUnaCopia` insertaba claves nuevas después del `Get` y comprobaba que el valor
+devuelto no cambiaba. Pasaba igual sin la copia, porque **ninguna de esas inserciones toca los
+bytes de una celda ya escrita**: las claves nuevas caían en otras hojas, y una sustitución
+tampoco reescribe la celda en su sitio —`internal/tree` la borra y la vuelve a insertar—.
+
+Lo que sí mueve esos bytes es `node.Compactar`, que reordena todas las celdas hacia el final
+del cuerpo y pone a cero lo que queda libre. Se fuerza sustituyendo **la misma clave** una y
+otra vez sobre una hoja con poco espacio contiguo: cada sustitución deja una celda muerta,
+hasta que la siguiente inserción tiene que compactar para hacer sitio. Con el test así y sin
+la copia:
+
+```
+el valor devuelto por Get cambio bajo los pies del llamador: "tttttttttttttttt"...,
+era "bbbbbbbbbbbbbbbb"...
+```
+
+El valor del llamador no se corrompió: se convirtió en el de **otra clave**, que es
+exactamente el modo de fallo que D6 describe. La página es coherente, el CRC es correcto, y
+el error está en el pasado del llamador.
+
+### El bug del arnés: drenar el pipe después de `cmd.Wait()`
+
+Este no es un test flojo, es un error de verdad en el arnés, y del tipo que la sec. 11 llama
+más grave que un error en el motor.
+
+`TestCaidaYReapertura` lanza un hijo que inserta claves e imprime una línea por cada `Put`
+confirmado; el padre lee 1500 confirmaciones, mata al hijo, y exige que todas estén al
+reabrir. El padre drenaba lo que quedara en el pipe **después** de `cmd.Wait()`.
+
+`Wait` cierra el pipe de salida al ver terminar al proceso. Así que el drenaje no leía nada,
+y el padre creía que la última clave confirmada era la 1499 — cuando el hijo, que no se
+detuvo al dejar el padre de leer, había seguido confirmando hasta el `kill`. El efecto:
+claves realmente confirmadas quedaban fuera del conjunto que el criterio (b) comprueba, y
+—peor— caían fuera del rango que el criterio (c) considera "intentadas", así que su presencia
+legítima se contaba como el fallo *"apareció una clave que nunca se intentó escribir"*.
+
+Se detectó por accidente, y ese accidente es el interesante: la mutación de quitarle el
+`fsync` al commit puso el test en rojo, pero **por el motivo equivocado** —falló (c), no (b)—.
+Sin el `fsync` el hijo corría mucho más rápido y confirmaba muchas más claves entre el
+`break` y el `kill`, lo que hacía el desajuste grande y visible. Con el `fsync` puesto el
+desajuste era de una o dos claves y no llegaba a fallar nunca.
+
+Arreglado drenando antes de `Wait`. La consecuencia se ve en la salida: el padre pasa de
+registrar 1500 confirmaciones a registrar entre 1507 y 1510.
+
+### `kill -9` no puede distinguir si hubo `fsync`
+
+Con el arnés ya arreglado, la mutación de quitarle el `fsync` al `Commit` del WAL **pasa la
+prueba de caída**, cinco corridas de cinco:
+
+```
+=== M: Commit sin fsync, 5 corridas ===
+--- PASS: TestCaidaYReapertura (0.58s)
+--- PASS: TestCaidaYReapertura (0.15s)
+...
+```
+
+No es un fallo del test: es el límite de lo que un `kill -9` puede probar, y conviene tenerlo
+escrito porque el criterio de terminación de la F3 es literalmente ese `kill -9`.
+
+Matar un proceso no vacía ni invalida el caché de páginas del sistema operativo. Los bytes
+que el motor escribió con `write()` siguen ahí y el sistema los lleva al disco por su cuenta,
+haya habido `fsync` o no. Lo que un `kill -9` prueba es la **frontera del proceso**: que el
+motor no depende de nada que viva en su memoria, que no hay `defer` ni `Close` ni buffer
+propio del que dependa la durabilidad. Eso no es poco, y ningún test con disco en memoria lo
+prueba. Pero la **frontera del disco** —que el `fsync` sirva de algo, que el disco no
+reordene ni descarte ni desgarre— no la toca.
+
+Distinguirlas hace falta un disco falso con árbitro de orden global, que es la sec. 9.1 y por
+tanto la F4. Entretanto, lo que sí se puede afirmar en la F3 es el **orden de las llamadas**,
+y eso lo ve la traza compartida: `TestPutNoDevuelveSinElFsyncDelLog` exige que ningún `Put`
+devuelva `nil` sin que su registro de commit haya pasado por el `fsync` del log, y que nada
+haya bajado a `datos.db` por el camino. Es la mitad de la sec. 7.2 que se puede probar sin
+inyección de fallos.
+
+### La contradicción del invariante 6 con la sec. 7.6
+
+Al cerrar D8 —comprobar CRC y `page_id` también en las páginas **libres**, que es la mitad
+del invariante 6 que la F2 dejó abierta— la recuperación se puso en rojo sobre una base
+perfectamente sana:
+
+```
+Recuperar: tree: el arbol no cumple sus invariantes: la pagina libre 3 no es legible:
+page: crc invalido
+```
+
+No es un bug del motor. El invariante 6 de la sec. 6 dice que *toda* página de ambos
+conjuntos tiene CRC y `page_id` válidos, y la sec. 7.6 con el paso 5 de la sec. 8 mandan
+materializar la extensión del archivo con páginas cero **explícitas**. Una ranura así está en
+el conjunto de libres y un CRC de ceros es inválido: el diseño manda crear páginas que su
+propio invariante declara imposibles.
+
+Está anotado como **D11** en `docs/DEUDA-DISENO.md`, con las tres salidas y sin decidir: es
+una decisión del diseño, no de la implementación. Mientras tanto `comprobarLibres` acepta una
+página libre que sea íntegra **o** enteramente cero, y esa decisión está aislada en una sola
+función.
+
+### `FuzzLeer`: 168.757 ejecuciones, y el mismo contador a cero que en la F2
+
+El fuzzer del lector del WAL cubre lo que la sec. 9.4 pide para "el lector de registros del
+WAL". No lo cubría `FuzzRecord`, que existe desde la F0: aquel ejercita el **marco**
+—longitud, CRC, delimitación— y este lo que se hace con una carga que el marco ya dio por
+buena. Un registro con CRC correcto puede llevar dentro una página con un tipo imposible, un
+`page_id` que no es el suyo, o una longitud que no corresponde a su tipo, y esos caminos solo
+se alcanzan desde aquí.
+
+El corpus se siembra con logs bien formados además de con basura, porque un fuzzer que
+arrancara solo de bytes aleatorios casi nunca produciría una cabecera de registro válida y
+nunca llegaría a la parte que el fuzzer existe para probar.
+
+45 s, 168.757 ejecuciones, 3 entradas nuevas, sin fallos. **Y el mismo comportamiento que
+BUGS.md ya anotó para `FuzzArbol` en la F2:** el ritmo cayó a 0 ejecuciones/s a los 6
+segundos y se quedó ahí el resto de la corrida. Se comprobó lo mismo que entonces y con el
+mismo resultado: el corpus completo se replica en menos de un segundo, así que no hay ninguna
+entrada patológica en la que el motor se atascara. Que ocurra ahora en un fuzzer distinto,
+sobre código distinto, refuerza la atribución al arnés en esta máquina y descarta que fuera
+algo del árbol.
+
+### `-race` no se pudo correr
+
+`go test -race` necesita cgo y en esta máquina no hay compilador de C:
+
+```
+cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in %PATH%
+```
+
+El valor que tendría aquí es limitado —la sec. 2 declara un solo hilo escritor y
+`NO-GOALS.md` fija la concurrencia como exclusión permanente—, pero queda anotado para el CI
+de la F6, que corre en Linux y sí lo tiene.
+
+### Lo que esta fase no prueba
+
+- **Que el `fsync` sirva de algo.** Ver más arriba. La F3 prueba que se llama y en qué orden;
+  que el disco lo respete es la F4.
+- **Escrituras desgarradas.** Ninguna. Todas las corrupciones que se prueban son de un bit o
+  de una página entera, provocadas a mano y en un punto elegido. El desgarro real —media
+  página vieja y media nueva— es de la F4.
+- **Caídas en puntos arbitrarios.** Los tests de recuperación construyen estados de caída
+  concretos, elegidos por lo que se quiere probar. Las 500 caídas sistemáticas con semilla
+  reproducible son la F4.
+- **Borrado.** Sigue sin existir, así que el conjunto de páginas libres solo se llena por
+  extensiones del archivo y nunca por una fusión. Todo lo que la F3 demuestra sigue siendo
+  sobre **un árbol que solo crece**.
+- **Dos generaciones del WAL con contenido.** La recuperación sabe encadenarlas y hay un test
+  de que las barre, pero el único camino que crea dos generaciones a la vez es una caída en
+  mitad de una rotación, y ese punto de caída exacto no se provoca hasta la F4.

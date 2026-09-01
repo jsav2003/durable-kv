@@ -12,13 +12,14 @@ Este archivo se actualiza al cerrar cada fase.
 | D1 | Campo de longitud explícito en el marco de registro | sec. 7.3 | F3 | pendiente |
 | D2 | CRC32 con polinomio Castagnoli | sec. 5.1 y 7.3 | F1 / F3 | pendiente |
 | D3 | Los 4 bytes sin nombrar de la cabecera de página son relleno | sec. 5.1 | F1 | **decidida**, pendiente de reflejar |
-| D4 | El caché del pager no está acotado; la regla de desalojo vive en la escritura | sec. 7.5 | F3 | pendiente |
+| D4 | El caché del pager no está acotado; la regla de desalojo vive en la escritura | sec. 7.5 | F3 | **cerrada** en la F3 |
 | D5 | El campo `libre` de la cabecera es derivable de `nceldas`: se escribe, no se lee | sec. 5.1 | F2 | **decidida**, pendiente de reflejar |
-| D6 | `Key` y `Value` devuelven subsectores de la página, no copias | — | F3 | **decidida**, obligación pendiente |
+| D6 | `Key` y `Value` devuelven subsectores de la página, no copias | — | F3 | **cerrada** en la F3 |
 | D7 | La derivación del tope de 1000 bytes no descuenta el directorio de slots | sec. 4 y `NO-GOALS.md` | F2 | **decidida**, pendiente de reflejar |
-| D8 | `Validate()` no comprueba el CRC de las páginas libres | sec. 6 | F3 | **decidida**, obligación pendiente |
-| D9 | Un `Put` que falla a medias deja el grupo abierto: no hay camino de aborto | sec. 7.3 | F3 | **decidida**, obligación pendiente |
+| D8 | `Validate()` no comprueba el CRC de las páginas libres | sec. 6 | F3 | **cerrada** en la F3, con el matiz de D11 |
+| D9 | Un `Put` que falla a medias deja el grupo abierto: no hay camino de aborto | sec. 7.3 | sin asignar | **sigue abierta**, análisis revisado |
 | D10 | El `fsync` de directorio no existe en Windows: no-op documentado | sec. 7.4 | F3 | **decidida**, limitación permanente |
+| D11 | El invariante 6 no puede ser cierto para una ranura materializada por extensión | sec. 6 y 7.6 | **la decides tú** | contradicción del diseño consigo mismo |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -356,3 +357,134 @@ operación no existe en Windows y que allí las defensas 1 y 2 son las que sosti
 regla del primer CRC inválido.
 
 **Fase.** F3. Detectada al escribir `internal/fsx`.
+
+---
+
+## Cierres de la F3
+
+### D4 · cerrada
+
+El caché sigue sin acotar, que es lo que la entrada decidía, y la regla de desalojo de la
+sec. 7.5 dejó de ser código que solo ejercitaba su propio test: ahora la atraviesa **cada
+corrida del checkpoint**, porque el paso 1 de la sec. 7.4 baja páginas sucias por
+`writePage`. Con el WAL real detrás, `FlushedLSN` puede quedarse de verdad por detrás de lo
+asignado entre commits, cosa que `NopLog` no podía modelar.
+
+Queda pendiente de reflejar en la sec. 7.5 que la regla se aplica en toda bajada a
+`datos.db` y no solo en el desalojo, y que el caché acotado es una posibilidad futura y no
+una premisa. Si la F4 necesita forzar desalojos, es ahí donde el caché se acota y aparece la
+fijación.
+
+### D6 · cerrada
+
+`tree.Get` copia con `bytes.Clone` y el `Get` público la propaga sin deshacerla.
+
+Lo que hay que anotar es que el primer test que lo comprobaba **no probaba nada**: quitar la
+copia no lo ponía en rojo. Insertar en otras hojas no toca los bytes de una celda ya
+escrita, y una sustitución tampoco la reescribe en su sitio. Lo que sí mueve esos bytes es la
+**compactación** (`node.Compactar`), que reordena todas las celdas hacia el final del cuerpo.
+Se fuerza sustituyendo la misma clave una y otra vez, porque cada sustitución es un borrado
+más una inserción y deja una celda muerta que consume el espacio contiguo. Con el test así,
+quitar la copia hace que el valor devuelto se convierta en el de otra clave.
+
+### D8 · cerrada, con el matiz de D11
+
+La comprobación existe y corre en la recuperación (`internal/recovery`, `comprobarLibres`),
+que es donde se cumple su precondición: los pasos 5 y 6 de la sec. 8 acaban de materializar
+el archivo entero.
+
+No vive en `internal/tree` como anticipaba la entrada, y por dos razones que solo se ven al
+escribirla. La precondición es un hecho de la recuperación y no del árbol, así que un
+`Validate` que la exigiera sería un `Validate` que no se puede llamar en cualquier momento —
+y llamarlo en cualquier momento es justo para lo que existe. Y leer la ranura en crudo, sin
+pasar por `pager.Get`, evita meter en el caché del pager páginas que nadie va a usar.
+
+Lo que la comprobación acepta además de una página íntegra es una ranura **a ceros**. El
+porqué es D11.
+
+### D9 · sigue abierta, y es más grande de lo que parecía
+
+La entrada decía que el aborto, con el WAL existiendo, es "releer del log las páginas del
+grupo **o** descartarlas del caché para que el siguiente `Get` las traiga de `datos.db`".
+Escribiéndolo se ve que la segunda mitad de esa disyunción es incorrecta y que la primera es
+bastante más trabajo del que la frase sugiere:
+
+- **Descartar del caché no basta.** Vale solo si la página estaba limpia al entrar en el
+  grupo. Una página que ya estaba sucia por un grupo anterior tiene en `datos.db` una
+  versión **vieja** —sus cambios están en el log y no han pasado por un checkpoint—, así que
+  el siguiente `Get` la traería obsoleta y en silencio.
+- **Un snapshot al ensuciar tampoco.** El árbol muta la página y *después* llama a
+  `MarkDirty`, así que para cuando el pager se entera ya no hay estado anterior que copiar.
+  Capturarlo obligaría a mover la copia al `Get`, y eso es una copia de 4 KiB por página de
+  cada descenso.
+- **Hay que rebobinar el WAL.** Las imágenes del grupo abortado ya están anexadas. Si no se
+  retrocede el LSN y el desplazamiento hasta el último commit, el grupo siguiente las
+  hereda: la recuperación agrupa "las imágenes desde el commit anterior", así que su
+  `n_registros` no cuadraría y el log entero a partir de ahí se descartaría con
+  `ErrGrupoIncompleto`.
+
+La forma correcta es la primera de la disyunción, completa: rebobinar el log, y para cada
+página del grupo restaurar su última imagen **confirmada** de la generación actual, o
+descartarla del caché si no tiene ninguna —en ese caso su último estado sí está en
+`datos.db`, porque la rotación solo ocurre en un checkpoint y el checkpoint baja todas las
+sucias—.
+
+**Por qué no se hace ahora.** No es solo el tamaño. El único fallo que puede llegar hasta
+dentro de un grupo es una página que no es lo que dice ser: CRC malo, `page_id` que no
+corresponde, un cuerpo que `node.Check` rechazaría. Es decir, corrupción del disco. En esa
+situación no está claro que recuperar el estado *en memoria* sea lo que se quiere: un pager
+que se niega a seguir es información, y un motor que continúa sobre un disco que acaba de
+devolver basura es un motor que va a producir más basura. La F4, que es la que va a generar
+esos casos a propósito, es también la que dirá qué comportamiento quiere de ellos.
+
+**Fase: sin asignar.** La tabla de la sec. 10 no tiene una casilla para esto, y forzarla en
+la F3 sería adelantar trabajo sobre una decisión que la F4 informa. Se decide al abrir la F4.
+
+## D11 · El invariante 6 no puede ser cierto para una ranura materializada por extensión
+
+**Esto no es una decisión de implementación: es una contradicción del diseño consigo mismo,
+y la decides tú.** Se anota aquí porque es donde va lo que el `DESIGN.md` todavía no refleja,
+pero a diferencia del resto de entradas no viene con una decisión tomada.
+
+**Qué no cuadra.** La sec. 6, invariante 6, dice:
+
+> Toda página de ambos conjuntos tiene CRC y `page_id` válidos.
+
+Y la sec. 7.6, más el paso 5 de la sec. 8, dicen que crecer `datos.db` es una operación de
+metadatos que **ninguna imagen de página describe**, y que la extensión se materializa con
+páginas cero **explícitas**.
+
+Una ranura así está en el conjunto de libres —no es alcanzable desde la raíz— y es todo
+ceros. Un CRC de ceros es inválido. Así que hay páginas que el propio diseño manda crear y
+que el invariante 6 declara imposibles.
+
+**No es hipotético.** El caso lo produce cualquier registro de commit que suba `total_pages`
+sin traer imágenes, que es exactamente la forma que la sec. 7.6 le da a una extensión. Lo
+reproduce `TestUnaPaginaLibreACerosEsLegitima`, y con la comprobación estricta la
+recuperación falla ahí con `page: crc invalido` sobre una base perfectamente sana.
+
+**Lo que hace la implementación mientras tanto.** `comprobarLibres` acepta una página libre
+que sea íntegra **o** enteramente cero. Se conserva lo que el invariante persigue —que una
+página libre no sea basura ilegible que un día se recicle y pase por datos— porque una
+ranura a ceros es un valor conocido y deliberado, no basura; es el mismo argumento que D3
+hace para los 4 bytes de relleno. Y al reciclarse, `pager.Alloc` entrega una página nueva a
+ceros de todas formas, así que su contenido anterior no se lee nunca.
+
+**Lo que se pierde.** Una escritura desgarrada que dejara una ranura libre entera a ceros
+sería indistinguible de una extensión legítima. Es una franja estrecha, y es el precio de que
+el formato de la sec. 5.1 no defina un tipo de página para las libres.
+
+**Las tres salidas, para que elijas.**
+
+1. **Reformular el invariante 6** en la sec. 6: *toda página de ambos conjuntos es legible —
+   una página íntegra con su `page_id`, o una ranura a ceros aún sin usar—*. Es lo que el
+   código hace hoy. Coste: la franja estrecha de arriba.
+2. **Un tipo de página para las libres** en la sec. 5.1, escrito por la extensión con su CRC
+   válido. El invariante 6 se sostiene literalmente y el desgarro deja de ser
+   indistinguible. Coste: un valor nuevo en el campo `tipo`, y que extender el archivo pase
+   de escribir ceros a codificar páginas — más caro, y toca un formato que ya está en disco.
+3. **Dejarlo como está y no comprobar las libres**, volviendo a D8 sin cerrar. Coste: la
+   mitad del invariante 6 no se comprueba nunca, que es donde estaba la F2.
+
+**Fase.** La decides tú. La implementación actual es la opción 1 y está aislada en una sola
+función, así que cambiar a la 2 o a la 3 no toca nada más.

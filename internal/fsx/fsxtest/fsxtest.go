@@ -126,6 +126,15 @@ func (d *Disco) Bytes(nombre string) []byte {
 	return slices.Clone(a.datos)
 }
 
+// Tamano es el tamano actual de un archivo, o -1 si no existe.
+func (d *Disco) Tamano(nombre string) int64 {
+	a, ok := d.archivos[nombre]
+	if !ok {
+		return -1
+	}
+	return int64(len(a.datos))
+}
+
 // Archivo es un fsx.File en memoria que anota lo que hace en la traza del Disco.
 type Archivo struct {
 	nombre string

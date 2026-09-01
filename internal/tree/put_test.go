@@ -11,7 +11,7 @@ import (
 )
 
 // arbolNuevo crea un árbol vacío sobre un archivo en memoria.
-func arbolNuevo(t *testing.T) (*Tree, *pager.Pager) {
+func arbolNuevo(t testing.TB) (*Tree, *pager.Pager) {
 	t.Helper()
 	pg, err := pager.Create(&memFile{}, &pager.NopLog{})
 	if err != nil {

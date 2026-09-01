@@ -24,6 +24,15 @@ func Abrir(ruta string) (Dir, error) {
 	return &dirOS{ruta: ruta}, nil
 }
 
+// Crear es Abrir creando el directorio si no existe, con sus padres. Lo usa quien abre una
+// base de datos: ahí, una ruta que no existe es "todavía no hay base", no una equivocación.
+func Crear(ruta string) (Dir, error) {
+	if err := os.MkdirAll(ruta, 0o755); err != nil {
+		return nil, err
+	}
+	return Abrir(ruta)
+}
+
 func (d *dirOS) Open(nombre string) (File, error) {
 	// Sin O_TRUNC y sin O_APPEND: el WAL se posiciona por offset explícito (record.Writer
 	// lleva el suyo), y truncar al abrir borraría justo el log que la recuperación va a

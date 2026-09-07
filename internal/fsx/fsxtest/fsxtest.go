@@ -1,15 +1,19 @@
 // Package fsxtest es el sistema de archivos en memoria con el que se prueban los
 // paquetes que escriben a disco.
 //
-// No simula ningún fallo: aquí solo hace falta observar qué se escribe, en qué archivo y
-// en qué orden. La traza que comparten todos los archivos de un mismo Disco es una
-// versión en miniatura del árbitro de orden global de la sec. 9.1 -- lo que hay que
-// demostrar del write-ahead no es que las escrituras ocurran, sino en qué orden ocurren
-// **entre datos.db y el WAL**, y con una traza por componente ese orden relativo no se
-// puede observar.
+// Tiene dos modos. Por omisión no simula ningún fallo: cada WriteAt se aplica al vuelo y
+// lo único que aporta sobre un buffer es la traza compartida por todos los archivos de un
+// mismo Disco -- una versión en miniatura del árbitro de orden global de la sec. 9.1,
+// porque lo que hay que demostrar del write-ahead no es que las escrituras ocurran, sino
+// en qué orden ocurren **entre datos.db y el WAL**, y con una traza por componente ese
+// orden relativo no se puede observar.
 //
-// El disco falso de verdad -- con descartes, reordenamiento y escrituras desgarradas --
-// es de la F4, y crece a partir de aquí.
+// Con Volatil en true entra el buffer de escrituras no sincronizadas de la sec. 9.1: un
+// WriteAt no toca el contenido duradero hasta que un Sync lo vuelca, igual que el caché
+// del sistema operativo. Las dos instancias de File (datos y WAL) comparten **una sola**
+// cola de pendientes, etiquetada por nombre de archivo; Sync de un archivo vacía solo sus
+// entradas. Esta es la base sobre la que la F4 monta el descarte, el reordenamiento y la
+// escritura desgarrada de la caída.
 package fsxtest
 
 import (
@@ -62,6 +66,15 @@ func (t *Traza) Contiene(e string) bool {
 	return t.Indice(e) >= 0
 }
 
+// escritura es un WriteAt que aún no ha pasado por Sync. Vive en la cola global del Disco,
+// no en el Archivo, porque el orden que importa modelar es el que hay entre las escrituras
+// de datos.db y las del WAL.
+type escritura struct {
+	archivo string
+	off     int64
+	datos   []byte
+}
+
 // Disco es un fsx.Dir en memoria.
 type Disco struct {
 	Traza    *Traza
@@ -69,6 +82,18 @@ type Disco struct {
 	// SyncFalla, si no es nil, es el error que devuelve el fsync del directorio. Modela
 	// la plataforma donde la operación no está disponible, y el fallo real de E/S.
 	SyncFalla error
+
+	// Volatil activa el buffer de la sec. 9.1. Con Volatil en false (lo normal fuera de la
+	// F4) cada WriteAt se aplica al vuelo y el Disco es un observador simple.
+	Volatil bool
+
+	// pendientes es la cola global de escrituras sin sincronizar, en orden de emisión.
+	// Solo se usa con Volatil en true.
+	pendientes []escritura
+
+	// nEscrituras cuenta los WriteAt sobre todos los archivos del Disco. Es el número N de
+	// "caer en la escritura N" de la sec. 9.2.
+	nEscrituras int
 }
 
 // Nuevo devuelve un Disco vacío con su traza.
@@ -84,7 +109,7 @@ func (d *Disco) Open(nombre string) (fsx.File, error) {
 		d.Traza.Anota("%s:open", nombre)
 		return a, nil
 	}
-	a := &Archivo{nombre: nombre, traza: d.Traza}
+	a := &Archivo{nombre: nombre, disco: d}
 	d.archivos[nombre] = a
 	d.Traza.Anota("%s:create", nombre)
 	return a, nil
@@ -96,6 +121,9 @@ func (d *Disco) Remove(nombre string) error {
 		return fmt.Errorf("fsxtest: %s no existe", nombre)
 	}
 	delete(d.archivos, nombre)
+	d.pendientes = slices.DeleteFunc(d.pendientes, func(e escritura) bool {
+		return e.archivo == nombre
+	})
 	d.Traza.Anota("%s:remove", nombre)
 	return nil
 }
@@ -122,7 +150,10 @@ func (d *Disco) Listar() ([]string, error) {
 	return d.Nombres(), nil
 }
 
-// Bytes devuelve el contenido de un archivo, o nil si no existe.
+// Bytes devuelve el contenido **duradero** de un archivo -- lo que sobreviviría a una
+// caída ahora mismo --, o nil si no existe. Con Volatil en true, las escrituras que aún
+// no han pasado por Sync no están aquí; se ven solo desde ReadAt, igual que el caché del
+// sistema es coherente para el proceso pero no para el disco.
 func (d *Disco) Bytes(nombre string) []byte {
 	a, ok := d.archivos[nombre]
 	if !ok {
@@ -131,7 +162,7 @@ func (d *Disco) Bytes(nombre string) []byte {
 	return slices.Clone(a.datos)
 }
 
-// Tamano es el tamano actual de un archivo, o -1 si no existe.
+// Tamano es el tamano duradero de un archivo, o -1 si no existe.
 func (d *Disco) Tamano(nombre string) int64 {
 	a, ok := d.archivos[nombre]
 	if !ok {
@@ -140,24 +171,79 @@ func (d *Disco) Tamano(nombre string) int64 {
 	return int64(len(a.datos))
 }
 
+// NEscrituras es cuántos WriteAt lleva el Disco sobre todos sus archivos.
+func (d *Disco) NEscrituras() int {
+	return d.nEscrituras
+}
+
+// Pendientes es cuántas escrituras sin sincronizar hay en la cola global.
+func (d *Disco) Pendientes() int {
+	return len(d.pendientes)
+}
+
+// aplica vuelca una escritura al contenido duradero de su archivo. Si el archivo ya no
+// existe -- lo borró un Remove -- la escritura se pierde, que es lo correcto.
+func (d *Disco) aplica(e escritura) {
+	a, ok := d.archivos[e.archivo]
+	if !ok {
+		return
+	}
+	if fin := e.off + int64(len(e.datos)); fin > int64(len(a.datos)) {
+		a.datos = append(a.datos, make([]byte, fin-int64(len(a.datos)))...)
+	}
+	copy(a.datos[e.off:], e.datos)
+}
+
+// sincroniza vuelca las pendientes de un archivo y las saca de la cola global. Las de los
+// demás archivos se quedan: un fsync a datos.db no hace duraderas las escrituras al WAL.
+func (d *Disco) sincroniza(nombre string) {
+	resto := d.pendientes[:0:0]
+	for _, e := range d.pendientes {
+		if e.archivo == nombre {
+			d.aplica(e)
+		} else {
+			resto = append(resto, e)
+		}
+	}
+	d.pendientes = resto
+}
+
 // Archivo es un fsx.File en memoria que anota lo que hace en la traza del Disco.
 type Archivo struct {
 	nombre string
-	traza  *Traza
+	disco  *Disco
 	datos  []byte
 	// Cerrado se pone a true en Close. Un archivo cerrado sigue legible desde el Disco:
 	// lo que interesa comprobar es que el WAL cierra el que deja atrás, no impedirlo.
 	Cerrado bool
 }
 
+// visible es el contenido que ve el proceso: el duradero con las pendientes de este
+// archivo superpuestas en orden. Es lo que devuelve una lectura mientras el proceso sigue
+// vivo, aunque nada de eso haya llegado al disco.
+func (a *Archivo) visible() []byte {
+	b := slices.Clone(a.datos)
+	for _, e := range a.disco.pendientes {
+		if e.archivo != a.nombre {
+			continue
+		}
+		if fin := e.off + int64(len(e.datos)); fin > int64(len(b)) {
+			b = append(b, make([]byte, fin-int64(len(b)))...)
+		}
+		copy(b[e.off:], e.datos)
+	}
+	return b
+}
+
 func (a *Archivo) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("fsxtest: offset negativo %d", off)
 	}
-	if off >= int64(len(a.datos)) {
+	datos := a.visible()
+	if off >= int64(len(datos)) {
 		return 0, io.EOF
 	}
-	n := copy(p, a.datos[off:])
+	n := copy(p, datos[off:])
 	if n < len(p) {
 		return n, io.ErrUnexpectedEOF
 	}
@@ -168,37 +254,44 @@ func (a *Archivo) WriteAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("fsxtest: offset negativo %d", off)
 	}
-	if fin := off + int64(len(p)); fin > int64(len(a.datos)) {
-		a.datos = append(a.datos, make([]byte, fin-int64(len(a.datos)))...)
+	a.disco.nEscrituras++
+	e := escritura{archivo: a.nombre, off: off, datos: slices.Clone(p)}
+	a.disco.pendientes = append(a.disco.pendientes, e)
+	a.disco.Traza.Anota("%s:write %d+%d", a.nombre, off, len(p))
+	if !a.disco.Volatil {
+		a.disco.sincroniza(a.nombre)
 	}
-	copy(a.datos[off:], p)
-	a.traza.Anota("%s:write %d+%d", a.nombre, off, len(p))
 	return len(p), nil
 }
 
 func (a *Archivo) Sync() error {
-	a.traza.Anota("%s:sync", a.nombre)
+	a.disco.Traza.Anota("%s:sync", a.nombre)
+	a.disco.sincroniza(a.nombre)
 	return nil
 }
 
 func (a *Archivo) Truncate(size int64) error {
+	// El truncado vacía primero lo pendiente de este archivo: un archivo real no reordena
+	// un truncado con las escrituras que ya tenía en el caché.
+	a.disco.sincroniza(a.nombre)
 	if size < int64(len(a.datos)) {
 		a.datos = a.datos[:size]
 	} else {
 		a.datos = append(a.datos, make([]byte, size-int64(len(a.datos)))...)
 	}
-	a.traza.Anota("%s:truncate %d", a.nombre, size)
+	a.disco.Traza.Anota("%s:truncate %d", a.nombre, size)
 	return nil
 }
 
 func (a *Archivo) Close() error {
 	a.Cerrado = true
-	a.traza.Anota("%s:close", a.nombre)
+	a.disco.Traza.Anota("%s:close", a.nombre)
 	return nil
 }
 
-// Size es el tamaño actual del archivo.
-func (a *Archivo) Size() (int64, error) { return int64(len(a.datos)), nil }
+// Size es el tamaño visible del archivo: el duradero más lo que este proceso ha escrito y
+// aún no ha sincronizado.
+func (a *Archivo) Size() (int64, error) { return int64(len(a.visible())), nil }
 
 var (
 	_ fsx.Dir  = (*Disco)(nil)

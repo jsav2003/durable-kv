@@ -19,7 +19,7 @@ Este archivo se actualiza al cerrar cada fase.
 | D8 | `Validate()` no comprueba el CRC de las páginas libres | sec. 6 | F3 | **cerrada** en la F3, con el matiz de D11 |
 | D9 | Un `Put` que falla a medias deja el grupo abierto: no hay camino de aborto | sec. 7.3 | sin asignar | **sigue abierta**, análisis revisado |
 | D10 | El `fsync` de directorio no existe en Windows: no-op documentado | sec. 7.4 | F3 | **decidida**, limitación permanente |
-| D11 | El invariante 6 no puede ser cierto para una ranura materializada por extensión | sec. 6 y 7.6 | **la decides tú** | contradicción del diseño consigo mismo |
+| D11 | El invariante 6 no puede ser cierto para una ranura materializada por extensión | sec. 6 y 7.6 | **la decides tú** | contradicción del diseño consigo mismo; la F4 añadió evidencia, no decisión |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -488,3 +488,10 @@ el formato de la sec. 5.1 no defina un tipo de página para las libres.
 
 **Fase.** La decides tú. La implementación actual es la opción 1 y está aislada en una sola
 función, así que cambiar a la 2 o a la 3 no toca nada más.
+
+**Lo que la F4 añadió.** El barrido de 500 puntos de caída, ya con el desgarro real en
+frontera de sector, corre en verde tanto con la opción 1 puesta como con la comprobación
+estricta (la opción 3 aplicada solo a `comprobarLibres`). Es decir: la "franja estrecha" no
+la produce este barrido —en la carga de prueba, ningún punto de caída deja una página libre
+entera a ceros que llegue a la comprobación—. No cambia las tres salidas ni su coste; acota
+lo que está en juego a algo aún más pequeño de lo que parecía. Está en `BUGS.md`, sección F4.

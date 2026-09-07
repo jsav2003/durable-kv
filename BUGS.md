@@ -519,3 +519,133 @@ de la F6, que corre en Linux y sí lo tiene.
 - **Dos generaciones del WAL con contenido.** La recuperación sabe encadenarlas y hay un test
   de que las barre, pero el único camino que crea dos generaciones a la vez es una caída en
   mitad de una rotación, y ese punto de caída exacto no se provoca hasta la F4.
+
+## F4 · Inyección de fallos
+
+Cero errores de código del motor detectados en esta fase. Como en la F1 y la F3, eso solo
+significa algo si se dice cómo se comprobó, y la comprobación aquí tiene una capa más: antes
+de creerle nada al barrido de 500 puntos hay que creerle al **disco falso** que lo sostiene,
+que es código nuevo escrito en esta fase. La sec. 9.1 lo dice sin rodeos —*"un error en el
+aparato de verificación es más grave que un error en el motor, porque hace que los verdes no
+signifiquen nada"*— así que la mayor parte del trabajo de la F4 fue sobre el aparato.
+
+El método es el de siempre: **verificación por mutación**. Se rompe algo a propósito y se
+exige un rojo. Aquí las mutaciones son de dos clases: las del motor, que el barrido debe
+cazar, y las del propio disco falso, que dicen si el barrido tiene dientes.
+
+### Qué modela el disco falso, y qué no
+
+`fsxtest` con `Volatil` en true mantiene las escrituras sin sincronizar en una cola
+**global** —una sola para `datos.db` y el WAL, etiquetada por archivo— y no las hace
+duraderas hasta que un `Sync` del archivo correspondiente las vuelca. Al llegar al `WriteAt`
+número `CaeEn`:
+
+1. descarta al azar una parte de las pendientes (las que el sistema aún no había llevado al
+   plato);
+2. reordena las que sí aplica (el disco no promete orden sin un `fsync` de por medio, y esos
+   ya no están en la cola);
+3. parte una de ellas en una frontera de sector de 512 bytes —la escritura desgarrada.
+
+Todo el azar sale de un `rand` sembrado con `Semilla`. El punto de caída N usa
+`semillaBase+N`, así que cada fila de la tabla es reproducible por separado y la tabla entera
+desde una sola constante. Un rojo cita `caída en escritura N, semilla semillaBase+N`.
+
+**Lo que el disco falso no modela**, y que por tanto la F4 tampoco prueba:
+
+- **La creación de un archivo no es una operación con caché.** `Open` crea el archivo en el
+  acto y de forma duradera; no hay un estado "el archivo existe pero el `fsync` del
+  directorio aún no". Una caída entre el `Open` de la generación nueva del WAL y el
+  `dir.Sync()` de la rotación no se provoca. El código de `Rotar` ordena las dos cosas y hay
+  un test de la F3 de que las ordena, pero el barrido no lo ejercita.
+- **El disco no corrompe un sector ya escrito.** Solo descarta, reordena y desgarra
+  escrituras **sin sincronizar**. Un bit que se voltea en un sector que ya estaba en el plato
+  —degradación del medio— es otra clase de fallo, y esa la cubren los tests de corrupción de
+  un bit de la F1 y la F3, no esta.
+
+### Las mutaciones del motor que el barrido caza
+
+Cada una se aplicó sola, se corrió `TestQuinientosPuntosDeCaida`, y se restauró.
+
+| Mutación | Qué se rompió | Puntos en rojo (de 500) | Criterio |
+|---|---|---|---|
+| M1 | `WAL.Commit` no hace `fsync` del registro de commit | 206 | (b) |
+| M2 | El checkpoint no hace `fsync` de `datos.db` (paso 4 de la sec. 7.4) | 89 | (b) |
+| M3 | La recuperación no aplica las imágenes de los grupos completos (paso 6 de la sec. 8) | 205 | (b) |
+
+Ninguna llega a 500, y el motivo es el mismo que la F3 anotó para el `kill -9`: **un punto
+de caída donde lo pendiente relevante ya estaba sincronizado no distingue el motor sano del
+roto.** M2 solo muerde cuando la caída cae dentro de un checkpoint o justo después; M3, solo
+cuando hay imágenes que reaplicar y no las tapó ya un checkpoint anterior. Que M2 y M3
+muerdan a la vez es la prueba de que el barrido **sí** mete puntos de caída dentro de un
+checkpoint y de una rotación del WAL, y no solo en el camino tranquilo de un `Put`.
+
+El criterio (b) —*toda clave cuyo `Put` devolvió OK está y con su valor*— es el que se pone
+en rojo en los tres casos. Es la afirmación central del proyecto, y es la que había que ver
+fallar.
+
+### La fuerza del barrido vive entera en `cae()`
+
+Mutación **H1**: `cae()` aplica **todas** las pendientes, intactas y en orden —una caída
+limpia, sin descarte ni reordenamiento ni desgarro. Resultado: **los 500 puntos en verde**,
+con M1, M2 y M3 puestas o sin poner.
+
+O sea: un barrido de 500 puntos sobre un `cae()` que no rompe nada no prueba absolutamente
+nada más que lo que ya probaba el `kill -9` de la F3. El verde de `TestQuinientosPuntosDeCaida`
+solo vale lo que valga la fidelidad de `cae()`, y por eso `cae()` tiene sus propios tests
+—`TestElDesgarroEsEnFronteraDeSector`, `TestLoSincronizadoSobreviveALaCaida`,
+`TestCaidaEsReproducibleConLaMismaSemilla`— que comprueban que descarta, que desgarra en
+frontera de sector, que respeta lo que pasó por `fsync`, y que la semilla lo hace
+reproducible.
+
+### La regla de desalojo (sec. 7.5): el barrido no la puede ejercer
+
+Mutación **M-WA**: quitar de `pager.writePage` la comprobación `wal_flushed_lsn < page_lsn`
+que impide bajar una página sucia a `datos.db` antes de sincronizar su registro de log.
+Resultado: **los 500 puntos en verde.**
+
+No es que la mutación sea equivalente —lo era la fila K de la F2—, es que **este camino no
+la alcanza**. `writePage` solo se llama desde `FlushDirty`, es decir en un checkpoint, y para
+entonces todo `Put` ya sincronizó su commit: `FlushedLSN` va siempre por delante de
+cualquier `page_lsn`. El motor, tal como está construido, nunca desaloja una página sucia con
+su WAL sin sincronizar, así que el barrido no tiene forma de crear la precondición.
+
+Quien la crea a mano es el pager: `TestReglaDeDesalojo` y `TestWriteAheadIrreparable`
+construyen el estado —página sucia, LSN sin sincronizar— y exigen `ErrWriteAhead`. Con M-WA
+puesta, esos dos tests se ponen en rojo de inmediato. La regla está viva y probada; lo que
+la F4 añade es la constancia de que el árbitro de orden global del disco falso **existiría**
+para cazarla el día que un caché acotado abra ese camino (docs/DEUDA-DISENO.md, D4).
+
+### D11: el barrido con desgarro real no toca la franja estrecha
+
+`comprobarLibres` acepta hoy una página libre que sea íntegra **o** enteramente cero, porque
+la extensión del archivo (sec. 7.6) materializa ranuras a ceros que ningún CRC valida —la
+contradicción del invariante 6 consigo mismo que quedó anotada como **D11**, sin decidir.
+
+Mutación **D11-estricto**: quitar la aceptación de la ranura a ceros, dejando solo
+`page.Decode`. Resultado con el desgarro real de la F4 en marcha: **los 500 puntos en
+verde.**
+
+Es una pieza de evidencia para la decisión que sigue siendo tuya, no la decisión. Dice que
+la "franja estrecha" que D11 describe —una escritura desgarrada que deje una ranura libre
+entera a ceros, indistinguible de una extensión legítima— **no la produce este barrido**: en
+140 claves con siete checkpoints, ningún punto de caída deja una página libre a ceros que
+llegue a `comprobarLibres`. La franja es estrecha de verdad. Las tres salidas de D11 siguen
+sobre la mesa con el mismo coste que antes; esto solo acota lo que está en juego.
+
+### Lo que esta fase no prueba
+
+- **Borrado.** Sigue sin existir. El conjunto de páginas libres solo se llena por extensiones
+  del archivo, nunca por una fusión, así que —igual que en la F2 y la F3— todo lo que la F4
+  demuestra es sobre **un árbol que solo crece**. La partición del invariante 6 se comprueba
+  en cada `Validate()` del criterio (a), pero sobre un conjunto de libres que casi siempre
+  está vacío.
+- **La caída durante la creación de un archivo.** Ver arriba: el disco falso hace la creación
+  duradera en el acto.
+- **La degradación del medio.** El disco falso no voltea bits en sectores ya escritos.
+- **Cargas concurrentes.** `NO-GOALS.md` fija un solo hilo escritor como exclusión
+  permanente; no hay nada que probar aquí, pero conviene decir que el barrido es
+  estrictamente secuencial.
+- **Puntos de caída más allá del 500.** La carga limpia emite 661 escrituras; se prueban los
+  primeros 500 puntos, que es lo que pide la tabla de la sec. 10. Los 161 restantes caen en
+  la parte final de la carga, donde no hay ninguna estructura que los 500 anteriores no
+  hayan ejercido ya.

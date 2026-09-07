@@ -73,7 +73,16 @@ func Open(ruta string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	est, err := recovery.Recuperar(dir, 0)
+	return abrirCon(dir, 0)
+}
+
+// abrirCon es Open sin el paso de crear el directorio en disco: recibe un fsx.Dir ya
+// hecho y el umbral de checkpoint. Existe para el arnés de inyección de fallos de la F4,
+// que abre la base sobre un disco falso con árbitro de orden (sec. 9.1) y necesita bajar
+// el umbral para que el checkpoint entre dentro de la carga de prueba. Se expone a los
+// tests por export_test.go.
+func abrirCon(dir fsx.Dir, umbral int64) (*DB, error) {
+	est, err := recovery.Recuperar(dir, umbral)
 	if err != nil {
 		return nil, err
 	}

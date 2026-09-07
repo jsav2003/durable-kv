@@ -227,6 +227,22 @@ func (d *Disco) sincroniza(nombre string) {
 	d.pendientes = resto
 }
 
+// Reabrir devuelve un Disco nuevo, no volátil y con su propia traza, que hereda solo el
+// contenido **duradero** de este: los mismos archivos, con los bytes que sobrevivirían a
+// una caída ahora mismo. Es lo que ve un proceso que arranca sobre el disco que dejó el
+// anterior al morir. Un archivo que existe pero está vacío se recrea vacío: su existencia
+// es un dato que la recuperación lee (paso 1 de la sec. 8).
+func (d *Disco) Reabrir() *Disco {
+	n := Nuevo()
+	for _, nombre := range d.Nombres() {
+		f, _ := n.Open(nombre)
+		if b := d.Bytes(nombre); len(b) > 0 {
+			f.WriteAt(b, 0)
+		}
+	}
+	return n
+}
+
 // Archivo es un fsx.File en memoria que anota lo que hace en la traza del Disco.
 type Archivo struct {
 	nombre string

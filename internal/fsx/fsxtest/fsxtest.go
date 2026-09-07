@@ -94,6 +94,19 @@ type Disco struct {
 	// nEscrituras cuenta los WriteAt sobre todos los archivos del Disco. Es el número N de
 	// "caer en la escritura N" de la sec. 9.2.
 	nEscrituras int
+
+	// CaeEn, si es > 0, es el número de escritura durante la cual el disco cae: al
+	// emitirse ese WriteAt se procesa la cola de pendientes (descarte, reordenamiento y
+	// una escritura desgarrada) y toda operación posterior devuelve ErrCaido. Requiere
+	// Volatil.
+	CaeEn int
+
+	// Semilla fija el azar del descarte, el reordenamiento y el desgarro. La misma semilla
+	// con la misma CaeEn y la misma carga reproduce la caída bit a bit (sec. 9.1).
+	Semilla int64
+
+	// Caido pasa a true cuando la caída ya ocurrió.
+	Caido bool
 }
 
 // Nuevo devuelve un Disco vacío con su traza.
@@ -117,6 +130,9 @@ func (d *Disco) Open(nombre string) (fsx.File, error) {
 
 // Remove borra el archivo nombre.
 func (d *Disco) Remove(nombre string) error {
+	if d.Caido {
+		return ErrCaido
+	}
 	if _, ok := d.archivos[nombre]; !ok {
 		return fmt.Errorf("fsxtest: %s no existe", nombre)
 	}
@@ -130,6 +146,9 @@ func (d *Disco) Remove(nombre string) error {
 
 // Sync anota el fsync del directorio.
 func (d *Disco) Sync() error {
+	if d.Caido {
+		return ErrCaido
+	}
 	d.Traza.Anota("dir:sync")
 	return d.SyncFalla
 }
@@ -239,6 +258,9 @@ func (a *Archivo) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("fsxtest: offset negativo %d", off)
 	}
+	if a.disco.Caido {
+		return 0, ErrCaido
+	}
 	datos := a.visible()
 	if off >= int64(len(datos)) {
 		return 0, io.EOF
@@ -254,10 +276,17 @@ func (a *Archivo) WriteAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("fsxtest: offset negativo %d", off)
 	}
+	if a.disco.Caido {
+		return 0, ErrCaido
+	}
 	a.disco.nEscrituras++
 	e := escritura{archivo: a.nombre, off: off, datos: slices.Clone(p)}
 	a.disco.pendientes = append(a.disco.pendientes, e)
 	a.disco.Traza.Anota("%s:write %d+%d", a.nombre, off, len(p))
+	if a.disco.CaeEn > 0 && a.disco.nEscrituras >= a.disco.CaeEn {
+		a.disco.cae()
+		return 0, ErrCaido
+	}
 	if !a.disco.Volatil {
 		a.disco.sincroniza(a.nombre)
 	}
@@ -265,12 +294,18 @@ func (a *Archivo) WriteAt(p []byte, off int64) (int, error) {
 }
 
 func (a *Archivo) Sync() error {
+	if a.disco.Caido {
+		return ErrCaido
+	}
 	a.disco.Traza.Anota("%s:sync", a.nombre)
 	a.disco.sincroniza(a.nombre)
 	return nil
 }
 
 func (a *Archivo) Truncate(size int64) error {
+	if a.disco.Caido {
+		return ErrCaido
+	}
 	// El truncado vacía primero lo pendiente de este archivo: un archivo real no reordena
 	// un truncado con las escrituras que ya tenía en el caché.
 	a.disco.sincroniza(a.nombre)

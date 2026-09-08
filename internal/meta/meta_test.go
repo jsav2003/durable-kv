@@ -101,6 +101,78 @@ func TestGanaElLSNMasAltoEnCualquieraDeLasDos(t *testing.T) {
 	}
 }
 
+// Con el mismo LSN en las dos ranuras gana la de época más alta, en la ranura que sea.
+//
+// Dos metas con el mismo LSN no son una rareza: el LSN de la meta es el del último
+// checkpoint, así que dos checkpoints sin ningún commit por medio escriben el mismo número.
+// Abrir y cerrar una base sin tocarla ya lo produce.
+//
+// Lo que estaba en juego cuando la F5 encontró esto: con una comparación solo por LSN el
+// empate lo ganaba la ranura 0 por ser la primera que se lee, y si la vieja era esa, la
+// recuperación arrancaba con una época del WAL que la rotación de la sec. 7.4 ya había
+// borrado. Leía un log vacío y daba por buena una base sin ninguno de los Put confirmados
+// desde el checkpoint. La versión de este test que solo miraba el LSN pasaba en verde.
+func TestConElMismoLSNGanaLaEpocaMasAlta(t *testing.T) {
+	casos := []struct {
+		nombre         string
+		epoca0, epoca1 uint32
+		quieroRanura   uint64
+	}{
+		{"la nueva en la 1", 3, 4, 1},
+		{"la nueva en la 0", 4, 3, 0},
+	}
+	for _, c := range casos {
+		t.Run(c.nombre, func(t *testing.T) {
+			const mismoLSN = 12
+
+			f := archivo(t)
+			m0, m1 := ejemplo(mismoLSN), ejemplo(mismoLSN)
+			m0.Epoca, m1.Epoca = c.epoca0, c.epoca1
+			if err := meta.Escribir(f, 0, m0); err != nil {
+				t.Fatal(err)
+			}
+			if err := meta.Escribir(f, 1, m1); err != nil {
+				t.Fatal(err)
+			}
+
+			got, ranura, err := meta.Leer(f)
+			if err != nil {
+				t.Fatalf("Leer: %v", err)
+			}
+			if ranura != c.quieroRanura {
+				t.Errorf("ranura = %d, quiero %d", ranura, c.quieroRanura)
+			}
+			if quiero := max(c.epoca0, c.epoca1); got.Epoca != quiero {
+				t.Errorf("epoca = %d, quiero %d: se eligio la meta vieja", got.Epoca, quiero)
+			}
+		})
+	}
+}
+
+// Y el LSN sigue mandando cuando difieren: la época solo decide lo que el LSN deja sin
+// decidir. Una época más alta con un LSN más bajo no puede ocurrir --- las dos crecen en el
+// mismo checkpoint --- pero si ocurriera, mandar sobre el LSN sería reproducir el log desde
+// un punto posterior al último commit y perder lo que hay entre medias.
+func TestElLSNMandaSobreLaEpoca(t *testing.T) {
+	f := archivo(t)
+	vieja, nueva := ejemplo(100), ejemplo(200)
+	vieja.Epoca, nueva.Epoca = 9, 2
+	if err := meta.Escribir(f, 0, vieja); err != nil {
+		t.Fatal(err)
+	}
+	if err := meta.Escribir(f, 1, nueva); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ranura, err := meta.Leer(f)
+	if err != nil {
+		t.Fatalf("Leer: %v", err)
+	}
+	if ranura != 1 || got.LSN != 200 {
+		t.Errorf("gano la ranura %d con lsn %d, quiero la 1 con 200", ranura, got.LSN)
+	}
+}
+
 // El punto entero de tener dos: si el sistema se cae escribiendo una, la otra sirve. Se
 // corrompe la de LSN más alto, que es la que se estaría escribiendo.
 func TestUnaCorruptaYLaOtraSirve(t *testing.T) {

@@ -130,13 +130,34 @@ func Escribir(f fsx.File, ranura uint64, m Meta) error {
 }
 
 // Leer es el paso 1 de la sec. 8: leer las dos ranuras, descartar las que fallen, y
-// quedarse con la válida de LSN más alto. Devuelve también la ranura en la que estaba, que
-// es lo que decide dónde escribe el siguiente checkpoint.
+// quedarse con la más nueva. Devuelve también la ranura en la que estaba, que es lo que
+// decide dónde escribe el siguiente checkpoint.
 //
 // Un fallo de lectura de una ranura se trata igual que una ranura inválida y no se
 // propaga. Es deliberado y es el punto entero de tener dos: un archivo recién creado mide
 // dos páginas a ceros, y un archivo truncado por una caída puede no llegar a la segunda.
 // Abortar aquí convertiría en pérdida permanente una situación que el WAL resuelve entera.
+//
+// # "La más nueva" no es "la de LSN más alto"
+//
+// La sec. 5.2 dice *"se elige la válida con el LSN más alto"*, y eso no basta: **dos metas
+// pueden tener el mismo LSN**. El LSN de la meta es el del último checkpoint, así que dos
+// checkpoints sin ningún commit por medio escriben el mismo número en las dos ranuras. Pasa
+// en cuanto se abre y se cierra una base sin tocarla, y también en el checkpoint del paso 10
+// justo después de una recuperación que no aplicó ningún grupo.
+//
+// Con un empate y una comparación estricta gana la ranura 0 por ser la primera que se lee,
+// que la mitad de las veces es la vieja. Y una meta vieja **miente sobre la generación del
+// WAL**: el paso 5 de la sec. 7.4 ya borró la que ella nombra, así que la recuperación abre
+// un log que no existe, lo encuentra vacío, y da por buena una base a la que le faltan todos
+// los Put confirmados desde entonces. Es pérdida silenciosa de datos confirmados, que es
+// exactamente lo que la sec. 4 promete que no pasa. La encontró la F5 (BUGS.md).
+//
+// El desempate es la **época**. No hace falta un contador nuevo porque ya hay uno: el paso 5
+// de la sec. 7.4 rota el WAL en todo checkpoint, sin condición, así que la época crece una
+// vez por cada escritura de meta y la más nueva de las dos es siempre la de época más alta.
+// El LSN sigue mandando cuando difieren --- es lo que la sec. 5.2 dice y es cierto ---; la
+// época solo decide lo que el LSN deja sin decidir.
 func Leer(f fsx.File) (Meta, uint64, error) {
 	var (
 		mejor   Meta
@@ -156,7 +177,7 @@ func Leer(f fsx.File) (Meta, uint64, error) {
 		if err != nil {
 			continue
 		}
-		if !hallada || m.LSN > mejor.LSN {
+		if !hallada || masNueva(m, mejor) {
 			mejor, ranura, hallada = m, r, true
 		}
 	}
@@ -164,6 +185,15 @@ func Leer(f fsx.File) (Meta, uint64, error) {
 		return Meta{}, 0, ErrSinMetaValida
 	}
 	return mejor, ranura, nil
+}
+
+// masNueva informa si a se escribió después que b: por LSN, y a igualdad de LSN por época.
+// Ver el comentario de Leer para por qué el LSN solo no alcanza.
+func masNueva(a, b Meta) bool {
+	if a.LSN != b.LSN {
+		return a.LSN > b.LSN
+	}
+	return a.Epoca > b.Epoca
 }
 
 // RanuraSiguiente devuelve la ranura sobre la que toca escribir, dada la que ganó la

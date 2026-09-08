@@ -649,3 +649,136 @@ sobre la mesa con el mismo coste que antes; esto solo acota lo que está en jueg
   primeros 500 puntos, que es lo que pide la tabla de la sec. 10. Los 161 restantes caen en
   la parte final de la carga, donde no hay ninguna estructura que los 500 anteriores no
   hayan ejercido ya.
+
+---
+
+## F5 · Pruebas basadas en propiedades
+
+Criterio de la sec. 10 cumplido: `TestPropiedadesContraElModelo` corre **cinco semillas de
+3000 operaciones** contra un `map[string]string`, y `TestPropiedadesSobreDiscoReal` repite
+una de ellas sobre un directorio de verdad. Salen unas 1500 inserciones y 700 sustituciones
+por corrida, 60 reaperturas, y un árbol de 800 claves al final.
+
+La fase encontró **un error, y de los caros**: pérdida silenciosa de datos confirmados.
+
+### El error: el empate de LSN entre las dos ranuras meta
+
+Reducido a siete operaciones y ninguna caída (`TestElCicloVacioNoPierdeLoConfirmado`):
+
+```
+1. base nueva          gana ranura=0   epoca=1   archivos=[datos.db datos.wal.1]
+2. tras Close          gana ranura=1   epoca=2   archivos=[datos.db datos.wal.3]
+3. tras Close vacío    gana ranura=0   epoca=3   archivos=[datos.db datos.wal.4]  <- miente
+4. Put("confirmada") -> nil
+5. reabrir             gana ranura=0   epoca=3   grupos=0
+   -> "tree: la clave no esta en el arbol"
+```
+
+**Qué lo causaba.** La sec. 5.2 dice *"se elige la válida con el LSN más alto"*, y `meta.Leer`
+lo implementaba con `m.LSN > mejor.LSN`. Pero **dos metas pueden tener el mismo LSN**: el de
+la meta es el del último checkpoint, así que dos checkpoints sin ningún commit por medio
+escriben el mismo número en las dos ranuras. Basta con abrir y cerrar una base sin tocarla; y
+también lo produce el checkpoint del paso 10 justo después de una recuperación que no aplicó
+ningún grupo, que es el caso corriente de reabrir una base bien cerrada.
+
+Con el empate y una comparación estricta ganaba la ranura 0 por ser la primera que se lee, y
+la mitad de las veces esa es la vieja. Lo que convierte el fallo en pérdida de datos, y no en
+un `root_id` desactualizado, es la **generación del WAL**: una meta vieja nombra una que el
+paso 5 de la sec. 7.4 ya borró. La recuperación abre `datos.wal.3`, `dir.Open` lo crea vacío
+—es lo que hace con un archivo que no existe—, lee cero grupos, no ve nada anómalo, y arranca
+una base a la que le faltan todos los `Put` confirmados desde ese checkpoint. Rompe la única
+frase que el proyecto entero existe para sostener (sec. 4).
+
+**Cómo se detectó.** Por la comparación completa tras una reapertura abandonada, en las cinco
+semillas, entre las operaciones 148 y 733. El síntoma era siempre un valor **viejo** de una
+clave, a veces del mismo tamaño que el correcto y distinto solo en los bytes. De ahí que el
+generador de valores marque cada escritura con el número de operación: dos escrituras
+sucesivas de la misma clave caliente no producen nunca los mismos bytes, y sin eso una
+sustitución perdida sería indistinguible de una aplicada.
+
+**El arreglo** (`ccd084c`) desempata por **época**. No hace falta inventar un contador: el
+paso 5 de la sec. 7.4 rota el WAL en todo checkpoint, sin condición, así que la época crece
+una vez por cada escritura de meta y la más nueva es siempre la de época más alta. El LSN
+sigue mandando cuando difieren. **Queda pendiente reflejar la regla de lectura en la sec. 5.2
+del DESIGN.md** (docs/DEUDA-DISENO.md, D12).
+
+### Por qué ninguna fase anterior podía verlo
+
+Ni la F3 ni la F4 abren la base más de dos veces: cargan, caen, reabren y comprueban. El
+empate necesita **dos checkpoints sin ningún commit entre medias**, y eso no ocurre en un
+arnés que solo abre para cargar y solo reabre para verificar. `TestCerrarYReabrir` tampoco lo
+alcanza: la primera apertura de una base nueva no tiene meta (`sinMeta`), así que la primera
+escritura de meta no compite con nada, y su único ciclo de cierre lleva 800 `Put` dentro que
+suben el LSN.
+
+Lo que lo destapa es que la secuencia **reabra a voluntad, en cualquier punto**, incluidos los
+puntos en los que no hay nada que registrar. Es la clase de estado que un test escrito a mano
+no visita porque no parece interesante.
+
+### El arnés pasaba en verde sin ejercer la recuperación
+
+La primera versión de este archivo reabría siempre con `Close`. Pasó en verde a la primera,
+con 69 reaperturas por corrida, y sin reproducir un solo registro del log. `Close` hace un
+checkpoint completo (sec. 7.4): baja todo a `datos.db`, pone la meta al día y rota. La
+apertura que viene detrás encuentra el WAL vacío y los diez pasos de la sec. 8 no tienen nada
+que hacer. Se estaba midiendo el camino barato y llamándolo recuperación.
+
+Con la mitad de las reaperturas **abandonando** la base sin `Close`, las cinco semillas se
+pusieron en rojo en la primera ejecución. El umbral de checkpoint tuvo que subir por la misma
+razón: el WAL transporta imágenes de página completas (`wal.CargaImagen`, 4104 bytes), así
+que con el umbral de 64 KiB de la primera versión hay un checkpoint cada ocho `Put` y el log
+nunca acumula nada. Con 1 MiB son entre 100 y 250 `Put`, y la corrida ahora **exige** que
+alguna reapertura haya tenido al menos 64 KiB de log por delante: salen entre 26 y 36
+reaperturas abandonadas por semilla, con hasta 635 KiB reproducidos.
+
+La lección es la misma que la F4 anotó sobre `cae()`: un arnés en verde no dice nada hasta que
+se sabe qué camino recorrió. Las cuentas del final de la corrida —sustituciones, rechazos,
+reaperturas abandonadas, mayor log reproducido, generación del log— están para eso, y tres de
+ellas son condiciones de fallo del test, no solo trazas.
+
+### Verificación por mutación
+
+| Mutación | Resultado | Dónde salta |
+|---|---|---|
+| **M-META** · quitar el desempate por época de `meta.Leer` | **rojo, 5/5** | la comparación completa tras reabrir abandonada, op. 148 a 733 |
+| **M-SUST** · que `Put` no borre la celda vieja: duplica la clave en vez de sustituirla | **rojo, 5/5** | la poscondición de `put`, op. 34 a 52 |
+| **M-SCAN** · que el fin del rango pase a inclusivo (`>=` por `>`) | **rojo, 5/5** | `scanRango`, op. 23 a 114 |
+| **M-COPY** · que `Get` devuelva el slice interno en vez de una copia (D6) | **verde: sobrevive** | — |
+
+**M-COPY sobrevive, y está bien que así sea.** La secuencia nunca conserva un valor de `Get` a
+través de una escritura posterior: lee, compara y lo suelta. Para verlo hay que retener el
+slice y forzar después una compactación de esa hoja, que es exactamente lo que hace
+`TestGetDevuelveUnaCopia` en `db_test.go` desde la F3. Es una propiedad sobre el **pasado del
+llamador**, no sobre el contenido de la base, y una comparación contra un modelo no la alcanza
+por construcción. Anotarlo importa: la cobertura de esta fase no es un superconjunto de la de
+las anteriores.
+
+### Por qué la reapertura abandonada va sobre el disco falso
+
+`TestPropiedadesSobreDiscoReal` no abandona nunca: siempre cierra. Abandonar deja los
+descriptores abiertos, y en Windows un archivo abierto no se puede borrar, así que la
+siguiente rotación del WAL falla con `The process cannot access the file because it is being
+used by another process`, y el borrado de `t.TempDir()` al terminar el test también. Se
+comprobó al escribir la primera versión de `TestElCicloVacioNoPierdeLoConfirmado` sobre un
+directorio real.
+
+No es un fallo del motor: un proceso que muere de verdad no conserva descriptores, y por eso
+el `kill -9` de la F3 corre en un subproceso (`crash_test.go`). Sí explica por qué
+`TestReaperturaSinCerrar` funciona sobre disco real: sus 400 `Put` no llegan a cruzar el
+umbral de 4 MiB, así que no hay rotación que intente borrar nada. Es una propiedad frágil de
+ese test y conviene tenerla escrita.
+
+### Lo que esta fase no prueba
+
+- **Durabilidad.** El disco no falla en ninguna de estas corridas. Lo que se comprueba es la
+  lógica del motor compuesto —árbol, log y checkpoint— contra el mapa. La sec. 9.3 separa las
+  dos clases a propósito, y la de durabilidad es la F4.
+- **Borrado.** Sigue sin existir, así que el modelo solo crece. Igual que en la F2, la F3 y la
+  F4, el conjunto de páginas libres casi siempre está vacío y la partición del invariante 6 se
+  comprueba sobre poca cosa.
+- **Escala.** 800 claves por corrida, un árbol de dos o tres niveles. Las 100.000 claves siguen
+  siendo de `TestCienMilClaves` (F2): esta fase busca variedad de secuencia, no tamaño.
+- **Concurrencia.** `NO-GOALS.md` fija un solo hilo escritor. La secuencia es estrictamente
+  secuencial.
+- **Lo que dice M-COPY:** las propiedades que hablan de la memoria que el llamador retiene, y
+  no del contenido de la base.

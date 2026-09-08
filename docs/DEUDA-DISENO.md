@@ -20,6 +20,7 @@ Este archivo se actualiza al cerrar cada fase.
 | D9 | Un `Put` que falla a medias deja el grupo abierto: no hay camino de aborto | sec. 7.3 | sin asignar | **sigue abierta**, análisis revisado |
 | D10 | El `fsync` de directorio no existe en Windows: no-op documentado | sec. 7.4 | F3 | **decidida**, limitación permanente |
 | D11 | El invariante 6 no puede ser cierto para una ranura materializada por extensión | sec. 6 y 7.6 | **la decides tú** | contradicción del diseño consigo mismo; la F4 añadió evidencia, no decisión |
+| D12 | La regla de elección entre las dos metas no cubre el empate de LSN | sec. 5.2 | F5 | **decidida** en la F5, pendiente de reflejar |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -495,3 +496,42 @@ estricta (la opción 3 aplicada solo a `comprobarLibres`). Es decir: la "franja 
 la produce este barrido —en la carga de prueba, ningún punto de caída deja una página libre
 entera a ceros que llegue a la comprobación—. No cambia las tres salidas ni su coste; acota
 lo que está en juego a algo aún más pequeño de lo que parecía. Está en `BUGS.md`, sección F4.
+
+---
+
+## D12 · La regla de elección entre las dos metas no cubre el empate
+
+**Qué dice el diseño.** Sec. 5.2: *"Al abrir, se leen ambas, se descartan las que fallen el
+CRC o el `page_id`, y se elige la válida con el LSN más alto."* Y antes: *"Al hacer checkpoint
+se escribe siempre sobre la más antigua."*
+
+**Por qué no basta.** Las dos frases se contradicen en un estado que la propia regla de
+escritura produce. El LSN de una meta es el del último checkpoint, así que **dos checkpoints
+sin ningún commit por medio escriben el mismo LSN en las dos ranuras**. Con las dos empatadas,
+"la del LSN más alto" no elige, y "la más antigua" tampoco identifica cuál es. No es un caso
+raro: lo produce abrir y cerrar una base sin tocarla, y lo produce el checkpoint del paso 10
+justo después de una recuperación que no aplicó ningún grupo, que es lo que pasa cada vez que
+se reabre una base bien cerrada.
+
+**Lo que costaba.** `meta.Leer` implementaba la frase literalmente, con `m.LSN > mejor.LSN`, y
+en el empate ganaba la ranura 0 por ser la primera que se lee. La mitad de las veces esa es la
+vieja, y una meta vieja nombra una generación del WAL que la rotación de la sec. 7.4 ya borró:
+la recuperación abre un log inexistente, lo encuentra vacío y arranca una base sin ninguno de
+los `Put` confirmados desde ese checkpoint. Pérdida silenciosa de datos confirmados, contra la
+garantía de la sec. 4. La encontró la secuencia de propiedades de la F5; el detalle y la
+reducción a siete operaciones están en `BUGS.md`, sección F5.
+
+**Qué se hizo** (`ccd084c`). Desempatar por **época**. No hace falta un contador nuevo: el paso
+5 de la sec. 7.4 rota el WAL en todo checkpoint, sin condición, así que la época crece una vez
+por cada escritura de meta y la más nueva de las dos es siempre la de época más alta. El LSN
+sigue mandando cuando difieren; la época solo decide lo que el LSN deja sin decidir. Son dos
+líneas en `meta.Leer`, sin tocar el formato de la página meta ni la versión, así que las bases
+existentes se siguen abriendo.
+
+**Lo que esto se apoya y hay que no romper.** La rotación del paso 5 tiene que seguir siendo
+**incondicional**. Si algún día un checkpoint decidiera no rotar cuando no hay nada que bajar,
+la época dejaría de crecer una vez por meta y el desempate volvería a no desempatar. Queda
+dicho aquí porque es la clase de optimización que parece gratis.
+
+**Fase.** Decidida en la F5 y ya implementada. **Pendiente de reflejar** en la sec. 5.2 del
+`DESIGN.md`, junto con D1, D2, D3, D5 y D7, en la F6.

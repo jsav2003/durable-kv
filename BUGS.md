@@ -782,3 +782,123 @@ ese test y conviene tenerla escrita.
   secuencial.
 - **Lo que dice M-COPY:** las propiedades que hablan de la memoria que el llamador retiene, y
   no del contenido de la base.
+
+---
+
+## F6 · Documentación y CI
+
+**La fase no está cerrada.** El criterio de la sec. 10 son cuatro cosas —DESIGN, TESTING y
+BUGS escritos, y CI en verde— y la última no se ha podido comprobar: los jobs de GitHub
+Actions no llegan a arrancar (ver más abajo). Lo que sí se hizo fue correr por primera vez la
+suite completa sobre Linux, que era la mitad del valor que se le pedía al CI.
+
+Cero errores del motor. Un error de análisis, que es lo que esta sección tiene que contar.
+
+### La primera corrida sobre Linux: verde, y sin nada que anotar del motor
+
+Todo el desarrollo ocurrió en Windows, así que hasta aquí solo se había probado
+`internal/fsx/os_windows.go`. La corrida se hizo sobre Ubuntu en WSL2 (kernel
+6.6.87.2-microsoft-standard-WSL2) con go1.26.7 linux/amd64, y sobre **ext4**, no sobre
+`/mnt/c`: drvfs conserva parte de la semántica de Windows y habría probado poco.
+
+`go build`, `go vet`, `gofmt -l` y `go test -count=1 ./...` en verde, los doce paquetes, a la
+primera. Los dos caminos que se esperaba que dieran problemas no dieron ninguno:
+
+- el `fsync` de directorio, que en Windows es un no-op (D10) y en Linux existe de verdad;
+- el borrado de un archivo abierto, que Windows prohíbe y Linux permite. Esa prohibición es la
+  que obliga a `TestReaperturaSinCerrar` a no cruzar el umbral de rotación y la que manda la
+  reapertura abandonada de la F5 al disco falso. Donde la restricción no existe, los dos
+  siguen pasando.
+
+### El error de análisis: el `fsync` de directorio no era el culpable
+
+Lo único llamativo de la corrida fueron los tiempos:
+
+| Test | Windows | Linux | |
+|---|---|---|---|
+| `TestElCheckpointSeDisparaSoloYNoAcumulaLogs` | 2,66 s | 20,44 s | 7,7× |
+| `TestCaidaYReapertura` (`kill -9`) | 1,97 s | 7,06 s | 3,6× |
+| `TestSobreviveConDivisiones` | 11,08 s | 18,94 s | 1,7× |
+| `TestReaperturaSinCerrar` | 0,34 s | 1,93 s | 5,7× |
+| `TestQuinientosPuntosDeCaida` (disco falso) | 2,87 s | **1,69 s** | 0,6× |
+
+La última fila es la que orienta: el barrido, que no toca el disco de verdad, es *más rápido*
+en Linux. Todo lo que va a disco real es de 2× a 8× más lento. La diferencia está en la E/S
+sincronizada y no en la CPU ni en el compilador.
+
+**La hipótesis fue que la causa era el `fsync` de directorio**, por ser justamente el camino
+que en Windows no se ejecuta (D10). Es falsa, y la desmiente un programa de cuarenta líneas
+—fuera del motor, para no medir el motor— que cronometra las tres operaciones en las dos
+plataformas:
+
+| | Windows / NTFS | Linux / ext4 en WSL2 | |
+|---|---|---|---|
+| `fsync` de archivo | 683 µs | 2,32 ms | 3,4× |
+| `fsync` de directorio, sin nada sucio | **no existe** | 0,56 µs | — |
+| una rotación entera (crear + `fsync` + 2 × `fsync` de directorio + borrar) | 1,18 ms | 4,56 ms | 3,9× |
+
+Lo que decide es **la frecuencia de cada uno, no su coste**. El `fsync` de archivo ocurre una
+vez por `Put` confirmado —es el paso 5 de la sec. 7.2—; el de directorio, una vez por
+rotación. En `TestElCheckpointSeDisparaSoloYNoAcumulaLogs`, que son 4000 `Put` con el umbral
+de 4 MiB, eso es **4000 `fsync` de archivo contra unas 4 rotaciones**: 4000 × 1,64 ms de
+diferencia son unos 6,6 s de los 17,8 s que separan las dos plataformas, y las 4 rotaciones
+enteras suman 18 ms. El `fsync` de directorio no puede explicar nada aquí, ni siquiera si
+costara mil veces más.
+
+El resto de la diferencia —los otros 11 s— no está aislado y no se va a fingir que sí: viene
+del volumen de E/S del checkpoint, que baja todas las páginas sucias antes de su `fsync`.
+Tampoco tiene sentido perseguirlo en WSL2, que corre sobre un disco virtual: los ratios
+orientan, los números absolutos son de esta máquina y de nadie más.
+
+La lección es la de la F4 sobre `cae()`, otra vez y desde el otro lado: una explicación
+plausible sobre por qué un número es como es no vale nada hasta que se mide. Aquí la
+explicación plausible señalaba precisamente al mecanismo más interesante del documento, que
+es lo que la hacía atractiva y lo que debería haberla hecho sospechosa.
+
+### D10, confirmado desde fuera del motor
+
+El mismo programa dio, sin buscarlo, la mejor evidencia que hay de D10. En Windows,
+`os.Open` sobre un directorio seguido de `Sync()` no falla por cómo esté escrito el motor:
+falla siempre.
+
+```
+sync C:\Users\sebas\AppData\Local\Temp\costefsync1223039689: Access is denied.
+```
+
+Cuarenta líneas de librería estándar, sin `internal/fsx` por medio. El no-op de
+`os_windows.go` no es una decisión de implementación que pudiera revisarse con más esfuerzo:
+es que Windows no entrega un handle de directorio que acepte `FlushFileBuffers`. D10 estaba
+anotada como limitación permanente y ahora tiene una comprobación independiente.
+
+### El CI no ha llegado a correr
+
+El workflow está escrito y empujado, y su primer disparo terminó en 2 segundos con los dos
+jobs en rojo **sin ejecutar un solo paso**:
+
+```
+Test (ubuntu-latest)  -> failure
+Test (windows-latest) -> failure
+"The job was not started because your account is locked due to a billing issue."
+```
+
+(run 34374907440). No es un fallo del workflow ni del código: es la cuenta de GitHub. El
+workflow queda sin ejercitar, y **el criterio "CI en verde" de la sec. 10 sigue sin
+cumplirse**. Conviene que quede escrito así y no como un detalle administrativo: un workflow
+que nunca corrió es exactamente igual de fiable que un test que nunca corrió.
+
+### Lo que esta fase no prueba, todavía
+
+- **El detector de carreras.** `go test -race` sigue sin haberse ejecutado ni una vez sobre
+  este código. Necesita cgo, y ni la máquina de desarrollo ni el Ubuntu de WSL2 tienen
+  compilador de C (`go: -race requires cgo`). Instalarlo en WSL2 pide `sudo`; el runner de
+  Actions lo trae de fábrica, así que espera al CI. Lo que se espera de él es confirmación
+  —`NO-GOALS.md` fija un solo hilo escritor y no hay una sola goroutine en el motor— pero
+  "se espera" no es "se comprobó".
+- **Linux de verdad.** WSL2 no es un runner de Actions: kernel propio, disco virtual, y un
+  `fsync` que cuesta lo que cuesta ahí. Lo que la corrida demuestra es que el código pasa por
+  el camino POSIX de `internal/fsx` sin romperse, no que lo haga con estos tiempos en otra
+  parte.
+- **La fila 5a del argumento de correctitud.** Sigue sin cobertura por inyección de fallos, y
+  correr en Linux no la añade: lo que falta es que el disco falso pueda modelar la creación
+  de un archivo como una operación con caché, y eso es del arnés, no de la plataforma
+  (`TESTING.md`, sec. 3.4).

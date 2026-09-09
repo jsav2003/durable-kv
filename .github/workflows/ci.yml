@@ -1,0 +1,85 @@
+# CI de la F6. Corre la suite completa, incluida la inyección de fallos (sec. 12 del
+# DESIGN.md).
+#
+# La matriz no es adorno. internal/fsx tiene dos implementaciones del sistema de archivos,
+# os_unix.go y os_windows.go, y hasta aquí solo se había probado la segunda: todo el
+# desarrollo ocurrió en Windows. En Linux hay dos cosas que allí no existen:
+#
+#   - el fsync de directorio de verdad. En Windows es un no-op documentado
+#     (docs/DEUDA-DISENO.md, D10), así que la fila 5a del argumento de correctitud
+#     --el corte en la rotación del WAL-- no se ejercita nunca en la máquina de desarrollo;
+#   - el borrado de un archivo que sigue abierto, que Windows prohíbe. Esa prohibición
+#     condiciona TestReaperturaSinCerrar y la reapertura abandonada de la F5 (BUGS.md, F5),
+#     así que en Linux esos tests recorren un camino distinto.
+#
+# -race solo corre en Linux, y no por preferencia: necesita cgo, y la máquina de desarrollo
+# no tiene compilador de C (BUGS.md, F3). Es la primera vez que este código pasa por el
+# detector de carreras. NO-GOALS.md fija un solo hilo escritor, así que lo que se espera de
+# él es confirmación, no hallazgos.
+#
+# Los objetivos de fuzz corren aquí solo con su corpus semilla, que es lo que hace `go test`
+# por defecto. Las corridas largas con -fuzz son manuales y están anotadas en BUGS.md: en CI
+# darían un tiempo distinto en cada ejecución y ninguna garantía.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      # Sin fail-fast: si una plataforma se pone en rojo, interesa ver qué hizo la otra.
+      # Es la comparación la que dice si el fallo es del motor o del sistema de archivos.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # La versión sale de go.mod y no se repite aquí: dos sitios que declaran la misma
+          # versión acaban discrepando.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Formato
+        # Solo en Linux: gofmt da el mismo resultado en las dos plataformas y duplicarlo solo
+        # duplicaría el ruido de un fallo.
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sin_formato=$(gofmt -l .)
+          if [ -n "$sin_formato" ]; then
+            echo "estos archivos no están formateados:"
+            echo "$sin_formato"
+            exit 1
+          fi
+
+      - name: Suite completa
+        # -count=1 desactiva el caché de resultados: en CI un verde cacheado no significa
+        # nada. Sin -short, que salta el barrido de 500 puntos de caída, las 100.000 claves
+        # de la F2 y las dos corridas de propiedades -- es decir, los cuatro tests por los
+        # que existe este proyecto.
+        run: go test -count=1 ./...
+
+      - name: Suite con el detector de carreras
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race -count=1 ./...

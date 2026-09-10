@@ -1,6 +1,6 @@
-package motor
+package durakv
 
-import "github.com/jsav2003/motor-almacenamiento/internal/fsx"
+import "github.com/jsav2003/durable-kv/internal/fsx"
 
 // AbrirCon expone abrirCon al arnés de inyección de fallos de la F4 (crash_injection_test.go),
 // que necesita abrir la base sobre un fsx.Dir en memoria en vez de un directorio de disco.

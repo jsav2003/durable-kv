@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
 )
 
 // carga escribe una secuencia fija a dos archivos con un Sync por medio, sobre un Disco ya

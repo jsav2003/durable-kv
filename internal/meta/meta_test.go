@@ -4,10 +4,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
-	"github.com/jsav2003/motor-almacenamiento/internal/meta"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/meta"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 func archivo(t *testing.T) fsx.File {

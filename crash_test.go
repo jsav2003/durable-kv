@@ -1,4 +1,4 @@
-package motor_test
+package durakv_test
 
 import (
 	"bufio"
@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	motor "github.com/jsav2003/motor-almacenamiento"
+	durakv "github.com/jsav2003/durable-kv"
 )
 
 // Este archivo es el criterio de terminación de la F3, tal como lo pide la tabla de la sec.
@@ -58,7 +58,7 @@ func TestHijoQueEscribe(t *testing.T) {
 		t.Skip("no es el proceso hijo: lo lanza TestCaidaYReapertura")
 	}
 
-	db, err := motor.Open(ruta)
+	db, err := durakv.Open(ruta)
 	if err != nil {
 		fmt.Println("error al abrir:", err)
 		os.Exit(1)
@@ -149,7 +149,7 @@ func TestCaidaYReapertura(t *testing.T) {
 	t.Logf("el hijo confirmo %d claves, la ultima la %d, antes del kill", len(confirmadas), ultima)
 
 	// --- La reapertura ---
-	db, err := motor.Open(base)
+	db, err := durakv.Open(base)
 	if err != nil {
 		t.Fatalf("Open tras el kill: %v", err)
 	}

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // llenaHoja mete entradas de n bytes de valor hasta que la hoja dice ErrNoSpace, y devuelve

@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/node"
+	"github.com/jsav2003/durable-kv/internal/node"
 )
 
 // FuzzArbol construye árboles con secuencias de Put sacadas de la entrada y exige que el

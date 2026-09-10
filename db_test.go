@@ -1,4 +1,4 @@
-package motor_test
+package durakv_test
 
 import (
 	"bytes"
@@ -9,12 +9,12 @@ import (
 	"slices"
 	"testing"
 
-	motor "github.com/jsav2003/motor-almacenamiento"
+	durakv "github.com/jsav2003/durable-kv"
 )
 
-func abre(t *testing.T, ruta string) *motor.DB {
+func abre(t *testing.T, ruta string) *durakv.DB {
 	t.Helper()
-	db, err := motor.Open(ruta)
+	db, err := durakv.Open(ruta)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestPutGetSobreDiscoReal(t *testing.T) {
 			t.Fatalf("Get(%d) = %q, quiero %q", i, got, valor(i))
 		}
 	}
-	if _, err := db.Get([]byte("no-esta")); !errors.Is(err, motor.ErrNotFound) {
+	if _, err := db.Get([]byte("no-esta")); !errors.Is(err, durakv.ErrNotFound) {
 		t.Errorf("Get de una clave ausente = %v, quiero ErrNotFound", err)
 	}
 	if err := db.Validate(); err != nil {
@@ -194,10 +194,10 @@ func TestGetDevuelveUnaCopia(t *testing.T) {
 func TestLimitesDeTamano(t *testing.T) {
 	db := abre(t, filepath.Join(t.TempDir(), "base"))
 
-	if err := db.Put(bytes.Repeat([]byte{'k'}, 513), []byte("v")); !errors.Is(err, motor.ErrKeyTooLarge) {
+	if err := db.Put(bytes.Repeat([]byte{'k'}, 513), []byte("v")); !errors.Is(err, durakv.ErrKeyTooLarge) {
 		t.Errorf("clave de 513 bytes = %v, quiero ErrKeyTooLarge", err)
 	}
-	if err := db.Put([]byte("k"), bytes.Repeat([]byte{'v'}, 1000)); !errors.Is(err, motor.ErrEntryTooLarge) {
+	if err := db.Put([]byte("k"), bytes.Repeat([]byte{'v'}, 1000)); !errors.Is(err, durakv.ErrEntryTooLarge) {
 		t.Errorf("entrada de mas de 1000 bytes = %v, quiero ErrEntryTooLarge", err)
 	}
 	// Y que el rechazo no envenene la base: la siguiente operación funciona.
@@ -208,7 +208,7 @@ func TestLimitesDeTamano(t *testing.T) {
 
 // Cerrar dos veces no es un error, y usar una base cerrada sí.
 func TestOperarSobreUnaBaseCerrada(t *testing.T) {
-	db, err := motor.Open(filepath.Join(t.TempDir(), "base"))
+	db, err := durakv.Open(filepath.Join(t.TempDir(), "base"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,13 +222,13 @@ func TestOperarSobreUnaBaseCerrada(t *testing.T) {
 		t.Errorf("segundo Close = %v, quiero nil", err)
 	}
 
-	if err := db.Put([]byte("k"), []byte("v")); !errors.Is(err, motor.ErrCerrada) {
+	if err := db.Put([]byte("k"), []byte("v")); !errors.Is(err, durakv.ErrCerrada) {
 		t.Errorf("Put tras Close = %v, quiero ErrCerrada", err)
 	}
-	if _, err := db.Get([]byte("k")); !errors.Is(err, motor.ErrCerrada) {
+	if _, err := db.Get([]byte("k")); !errors.Is(err, durakv.ErrCerrada) {
 		t.Errorf("Get tras Close = %v, quiero ErrCerrada", err)
 	}
-	if err := db.Scan(nil, nil, func(_, _ []byte) bool { return true }); !errors.Is(err, motor.ErrCerrada) {
+	if err := db.Scan(nil, nil, func(_, _ []byte) bool { return true }); !errors.Is(err, durakv.ErrCerrada) {
 		t.Errorf("Scan tras Close = %v, quiero ErrCerrada", err)
 	}
 }
@@ -238,7 +238,7 @@ func TestOperarSobreUnaBaseCerrada(t *testing.T) {
 func TestReaperturaSinCerrar(t *testing.T) {
 	ruta := filepath.Join(t.TempDir(), "base")
 
-	db, err := motor.Open(ruta)
+	db, err := durakv.Open(ruta)
 	if err != nil {
 		t.Fatal(err)
 	}

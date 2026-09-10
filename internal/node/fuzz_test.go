@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // arma monta una página con el cuerpo, el tipo, el número de celdas y la frontera del área

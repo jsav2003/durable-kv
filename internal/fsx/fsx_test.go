@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
 )
 
 func abre(t *testing.T) (fsx.Dir, string) {

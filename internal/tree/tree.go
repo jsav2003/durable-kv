@@ -24,9 +24,9 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/node"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/node"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
 )
 
 // SinEnlace cierra la cadena lateral de hojas y marca a un nodo interno sin hijo derecho.

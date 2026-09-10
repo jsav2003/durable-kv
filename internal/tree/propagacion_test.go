@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/node"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/node"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // Este archivo prueba la parte de la propagación que las inserciones normales casi nunca

@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
 )
 
 // Lo que hace útil al doble es la traza compartida: los eventos de dos archivos distintos

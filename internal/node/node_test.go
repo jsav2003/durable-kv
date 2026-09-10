@@ -8,7 +8,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // hoja y interno devuelven un nodo vacío del tipo que toca, sobre una página recién

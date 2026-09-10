@@ -1,4 +1,4 @@
-// Package motor es un motor de almacenamiento clave-valor embebido con durabilidad ante
+// Package durakv es un motor de almacenamiento clave-valor embebido con durabilidad ante
 // caídas.
 //
 // La garantía que ofrece, y a la que sirve todo lo demás: **si Put devuelve nil, ese dato
@@ -19,15 +19,15 @@
 // -- no lo necesita. Se declarará cuando se decida su fase, no antes: un método público que
 // devuelve "no implementado" es peor que uno que no está, porque compila en el código del
 // llamador.
-package motor
+package durakv
 
 import (
 	"errors"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/node"
-	"github.com/jsav2003/motor-almacenamiento/internal/recovery"
-	"github.com/jsav2003/motor-almacenamiento/internal/tree"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/node"
+	"github.com/jsav2003/durable-kv/internal/recovery"
+	"github.com/jsav2003/durable-kv/internal/tree"
 )
 
 // Los errores del contrato de la sec. 4, reexportados. Tienen que estarlo: los paquetes de
@@ -48,7 +48,7 @@ var (
 	ErrKeyTooLarge = node.ErrKeyTooLarge
 
 	// ErrCerrada indica una operación sobre una base ya cerrada.
-	ErrCerrada = errors.New("motor: la base esta cerrada")
+	ErrCerrada = errors.New("durakv: la base esta cerrada")
 )
 
 // DB es una base abierta. No es segura para uso concurrente: la sec. 2 declara un solo hilo

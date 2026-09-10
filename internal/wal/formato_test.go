@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
 )
 
 // paginaDePrueba devuelve una hoja con contenido reconocible en el cuerpo, para que un

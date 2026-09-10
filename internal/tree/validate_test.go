@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
 )
 
 func TestValidateArbolCanonico(t *testing.T) {

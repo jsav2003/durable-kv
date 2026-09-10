@@ -6,11 +6,11 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
-	"github.com/jsav2003/motor-almacenamiento/internal/record"
-	"github.com/jsav2003/motor-almacenamiento/internal/wal"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/record"
+	"github.com/jsav2003/durable-kv/internal/wal"
 )
 
 // hoja devuelve una página con contenido reconocible, para que un round-trip que perdiera

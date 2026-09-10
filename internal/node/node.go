@@ -30,7 +30,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 const (

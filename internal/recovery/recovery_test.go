@@ -8,14 +8,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
-	"github.com/jsav2003/motor-almacenamiento/internal/meta"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
-	"github.com/jsav2003/motor-almacenamiento/internal/record"
-	"github.com/jsav2003/motor-almacenamiento/internal/recovery"
-	"github.com/jsav2003/motor-almacenamiento/internal/tree"
-	"github.com/jsav2003/motor-almacenamiento/internal/wal"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/meta"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/record"
+	"github.com/jsav2003/durable-kv/internal/recovery"
+	"github.com/jsav2003/durable-kv/internal/tree"
+	"github.com/jsav2003/durable-kv/internal/wal"
 )
 
 // El modelo de caída de estos tests: se abre con Recuperar, se hacen Put --que confirman

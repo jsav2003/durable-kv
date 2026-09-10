@@ -4,10 +4,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
-	"github.com/jsav2003/motor-almacenamiento/internal/record"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/record"
 )
 
 // prefijo es la parte fija del nombre de un archivo de log.

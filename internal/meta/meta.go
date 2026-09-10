@@ -23,8 +23,8 @@ package meta
 import (
 	"encoding/binary"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // Ranuras es cuántas páginas meta hay: las 0 y 1, que es también pager.MetaPages.

@@ -1,4 +1,4 @@
-# motor-almacenamiento
+# durable-kv
 
 An embedded key-value storage engine in Go, standard library only. A B+tree over 4 KiB
 pages, with a write-ahead log and crash recovery.
@@ -34,9 +34,9 @@ and the seed that reproduces it.
 ## Quickstart
 
 ```go
-import motor "github.com/jsav2003/motor-almacenamiento"
+import durakv "github.com/jsav2003/durable-kv"
 
-db, err := motor.Open("path/to/db")   // the directory is created if missing
+db, err := durakv.Open("path/to/db")   // the directory is created if missing
 if err != nil {
     return err
 }

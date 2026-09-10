@@ -6,8 +6,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/node"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/node"
+	"github.com/jsav2003/durable-kv/internal/pager"
 )
 
 // arbolNuevo crea un árbol vacío sobre un archivo en memoria.

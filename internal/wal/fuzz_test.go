@@ -3,9 +3,9 @@ package wal_test
 import (
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
-	"github.com/jsav2003/motor-almacenamiento/internal/wal"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/wal"
 )
 
 // FuzzLeer alimenta el lector de grupos con bytes arbitrarios. La sec. 9.4 lo pide

@@ -36,10 +36,10 @@
 package checkpoint
 
 import (
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/meta"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
-	"github.com/jsav2003/motor-almacenamiento/internal/wal"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/meta"
+	"github.com/jsav2003/durable-kv/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/wal"
 )
 
 // UmbralPorDefecto son los bytes de WAL acumulados que disparan un checkpoint. La sec. 7.4

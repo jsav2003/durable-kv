@@ -1,4 +1,4 @@
-package motor_test
+package durakv_test
 
 import (
 	"bytes"
@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"testing"
 
-	motor "github.com/jsav2003/motor-almacenamiento"
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
-	"github.com/jsav2003/motor-almacenamiento/internal/wal"
+	durakv "github.com/jsav2003/durable-kv"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/wal"
 )
 
 // Este archivo es el criterio de terminación de la F4, tal como lo pide la tabla de la
@@ -64,7 +64,7 @@ func escriturasDeLaCargaLimpia(t *testing.T) int {
 	t.Helper()
 	d := fsxtest.Nuevo()
 	d.Volatil = true
-	db, err := motor.AbrirCon(d, umbralCaida)
+	db, err := durakv.AbrirCon(d, umbralCaida)
 	if err != nil {
 		t.Fatalf("abrir la base para medir: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestQuinientosPuntosDeCaida(t *testing.T) {
 			confirmadas := make(map[int]bool)
 			intentadas := make(map[int]bool)
 
-			db, err := motor.AbrirCon(d, umbralCaida)
+			db, err := durakv.AbrirCon(d, umbralCaida)
 			switch {
 			case err == nil:
 				for i := range nClavesCaida {
@@ -133,7 +133,7 @@ func TestQuinientosPuntosDeCaida(t *testing.T) {
 			}
 
 			// Reabrir sobre los bytes duraderos y recuperar.
-			db2, err := motor.AbrirCon(d.Reabrir(), umbralCaida)
+			db2, err := durakv.AbrirCon(d.Reabrir(), umbralCaida)
 			if err != nil {
 				t.Fatalf("recuperar tras la caída en la escritura %d (semilla=%d): %v", n, semilla, err)
 			}
@@ -228,7 +228,7 @@ func TestCaidaEntreLaCreacionDelLogYElFsyncDelDirectorio(t *testing.T) {
 			confirmadas := make(map[int]bool)
 			intentadas := make(map[int]bool)
 
-			db, err := motor.AbrirCon(d, umbralCaida)
+			db, err := durakv.AbrirCon(d, umbralCaida)
 			if err != nil {
 				t.Fatalf("abrir la base (semilla=%d): %v", semilla, err)
 			}
@@ -271,7 +271,7 @@ func TestCaidaEntreLaCreacionDelLogYElFsyncDelDirectorio(t *testing.T) {
 				nuevaSePierde++
 			}
 
-			db2, err := motor.AbrirCon(n, umbralCaida)
+			db2, err := durakv.AbrirCon(n, umbralCaida)
 			if err != nil {
 				t.Fatalf("recuperar tras el corte de la 5a (semilla=%d): %v", semilla, err)
 			}

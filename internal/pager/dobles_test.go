@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // Este archivo tiene los dos dobles de prueba del paquete: un File en memoria y un Log

@@ -40,7 +40,7 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // MetaPages son las páginas 0 y 1, las dos ranuras alternadas de la sec. 5.2. No las

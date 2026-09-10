@@ -30,7 +30,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/fsx"
 )
 
 // Traza es la secuencia de eventos observados, compartida por todos los archivos de un

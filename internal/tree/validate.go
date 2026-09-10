@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/pager"
 )
 
 // Validate comprueba los seis invariantes de la sec. 6 sobre el árbol entero y el conjunto

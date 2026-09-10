@@ -3,7 +3,7 @@ package node
 import (
 	"bytes"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // Split reparte el contenido de izq entre izq y der, y devuelve la clave separadora que el

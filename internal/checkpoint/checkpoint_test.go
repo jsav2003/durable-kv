@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/checkpoint"
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
-	"github.com/jsav2003/motor-almacenamiento/internal/meta"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
-	"github.com/jsav2003/motor-almacenamiento/internal/wal"
+	"github.com/jsav2003/durable-kv/internal/checkpoint"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
+	"github.com/jsav2003/durable-kv/internal/meta"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/wal"
 )
 
 // montaje es el motor mínimo con el que se prueba el checkpoint: un disco en memoria con

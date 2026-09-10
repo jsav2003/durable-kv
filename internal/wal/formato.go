@@ -11,9 +11,9 @@ package wal
 import (
 	"encoding/binary"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
-	"github.com/jsav2003/motor-almacenamiento/internal/record"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/record"
 )
 
 // Los dos tipos de registro de la sec. 7.3. internal/record transporta el campo sin

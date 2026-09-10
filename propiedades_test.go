@@ -1,4 +1,4 @@
-package motor_test
+package durakv_test
 
 import (
 	"bytes"
@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	motor "github.com/jsav2003/motor-almacenamiento"
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
+	durakv "github.com/jsav2003/durable-kv"
+	"github.com/jsav2003/durable-kv/internal/fsx/fsxtest"
 )
 
 // Este archivo es el criterio de terminación de la F5 en la tabla de la sec. 10 del
@@ -115,7 +115,7 @@ func topeValor(k []byte) int { return topeEntrada - cabeceraCelda - len(k) }
 // para la apertura inicial como para cada reapertura de la secuencia.
 type sitio struct {
 	nombre string
-	abrir  func() (*motor.DB, error)
+	abrir  func() (*durakv.DB, error)
 
 	// abandonable dice si la secuencia puede reabrir **sin** cerrar antes. Ver reabre: es la
 	// reapertura que de verdad ejerce la recuperación, y no todos los sitios la aguantan.
@@ -139,7 +139,7 @@ func sitioReal(t *testing.T) sitio {
 	ruta := filepath.Join(t.TempDir(), "base")
 	return sitio{
 		nombre: "disco real",
-		abrir:  func() (*motor.DB, error) { return motor.Open(ruta) },
+		abrir:  func() (*durakv.DB, error) { return durakv.Open(ruta) },
 	}
 }
 
@@ -155,7 +155,7 @@ func sitioFalso() (sitio, func() *fsxtest.Disco) {
 	s := sitio{
 		nombre:      "disco falso",
 		abandonable: true,
-		abrir: func() (*motor.DB, error) {
+		abrir: func() (*durakv.DB, error) {
 			// Reabrir hereda solo el contenido duradero. Sin volatilidad eso es todo lo
 			// escrito, pero se pasa por ahí igual para que la reapertura de la secuencia sea
 			// la misma operación que la de la F4 y no una versión más benigna: el proceso
@@ -163,7 +163,7 @@ func sitioFalso() (sitio, func() *fsxtest.Disco) {
 			// anterior, así que nada de lo que el motor tuviera en su caché de páginas puede
 			// colarse en la comprobación.
 			d = d.Reabrir()
-			return motor.AbrirCon(d, umbralProp)
+			return durakv.AbrirCon(d, umbralProp)
 		},
 		bytesDelLog: func() int64 {
 			var n int64
@@ -184,7 +184,7 @@ type corrida struct {
 	semilla int64
 	r       *rand.Rand
 	sitio   sitio
-	db      *motor.DB
+	db      *durakv.DB
 
 	// ref es el modelo de referencia de la sec. 9.3. orden son sus claves en el orden en que
 	// aparecieron: hace falta para elegir una clave existente al azar de forma determinista,
@@ -319,18 +319,18 @@ func (c *corrida) putRechazado() {
 	if c.r.IntN(2) == 0 {
 		k = bytes.Repeat([]byte{'K'}, topeClave+1+c.r.IntN(64))
 		v = []byte("v")
-		quiere = motor.ErrKeyTooLarge
+		quiere = durakv.ErrKeyTooLarge
 	} else {
 		k = fmt.Appendf(nil, "grande-%04d", c.r.IntN(1000))
 		v = bytes.Repeat([]byte{'V'}, topeValor(k)+1+c.r.IntN(64))
-		quiere = motor.ErrEntryTooLarge
+		quiere = durakv.ErrEntryTooLarge
 	}
 
 	if err := c.db.Put(k, v); !errors.Is(err, quiere) {
 		c.fatalf("Put(clave de %d, valor de %d) = %v, quiero %v", len(k), len(v), err, quiere)
 	}
 	// Y la clave rechazada no está. Si estuviera, el rechazo habría llegado tarde.
-	if _, err := c.db.Get(k); !errors.Is(err, motor.ErrNotFound) {
+	if _, err := c.db.Get(k); !errors.Is(err, durakv.ErrNotFound) {
 		c.fatalf("tras el rechazo, Get de la clave de %d bytes = %v, quiero ErrNotFound", len(k), err)
 	}
 }
@@ -355,7 +355,7 @@ func (c *corrida) getPresente() {
 // aparece en claveProp, así que el modelo no puede tenerla.
 func (c *corrida) getAusente() {
 	k := fmt.Appendf(nil, "ausente-%08d", c.r.IntN(1_000_000))
-	if _, err := c.db.Get(k); !errors.Is(err, motor.ErrNotFound) {
+	if _, err := c.db.Get(k); !errors.Is(err, durakv.ErrNotFound) {
 		c.fatalf("Get(%q), que nunca se escribio, = %v, quiero ErrNotFound", k, err)
 	}
 }
@@ -669,7 +669,7 @@ func TestPropiedadesContraElModelo(t *testing.T) {
 func TestElCicloVacioNoPierdeLoConfirmado(t *testing.T) {
 	s, _ := sitioFalso()
 
-	abrir := func(que string) *motor.DB {
+	abrir := func(que string) *durakv.DB {
 		db, err := s.abrir()
 		if err != nil {
 			t.Fatalf("%s: %v", que, err)

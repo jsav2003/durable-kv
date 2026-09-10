@@ -25,13 +25,13 @@ import (
 	"io"
 	"slices"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/checkpoint"
-	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
-	"github.com/jsav2003/motor-almacenamiento/internal/meta"
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
-	"github.com/jsav2003/motor-almacenamiento/internal/pager"
-	"github.com/jsav2003/motor-almacenamiento/internal/tree"
-	"github.com/jsav2003/motor-almacenamiento/internal/wal"
+	"github.com/jsav2003/durable-kv/internal/checkpoint"
+	"github.com/jsav2003/durable-kv/internal/fsx"
+	"github.com/jsav2003/durable-kv/internal/meta"
+	"github.com/jsav2003/durable-kv/internal/page"
+	"github.com/jsav2003/durable-kv/internal/pager"
+	"github.com/jsav2003/durable-kv/internal/tree"
+	"github.com/jsav2003/durable-kv/internal/wal"
 )
 
 // NombreDatos es el archivo del árbol (DESIGN.md sec. 5).

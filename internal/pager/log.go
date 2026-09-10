@@ -1,6 +1,6 @@
 package pager
 
-import "github.com/jsav2003/motor-almacenamiento/internal/page"
+import "github.com/jsav2003/durable-kv/internal/page"
 
 // State es el estado del asignador que viaja en el registro de commit (DESIGN.md sec.
 // 7.3). No es una copia de la meta: es la única fuente de verdad sobre dónde está la

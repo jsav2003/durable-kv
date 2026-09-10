@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jsav2003/motor-almacenamiento/internal/page"
+	"github.com/jsav2003/durable-kv/internal/page"
 )
 
 // nuevoPager monta un pager sobre un archivo vacío y devuelve las tres piezas. La traza

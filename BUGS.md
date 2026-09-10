@@ -792,7 +792,9 @@ BUGS escritos, y CI en verde— y la última no se ha podido comprobar: los jobs
 Actions no llegan a arrancar (ver más abajo). Lo que sí se hizo fue correr por primera vez la
 suite completa sobre Linux, que era la mitad del valor que se le pedía al CI.
 
-Cero errores del motor. Un error de análisis, que es lo que esta sección tiene que contar.
+Cero errores del motor, en las dos cosas que se hicieron: la corrida sobre Linux y el cierre
+de la fila 5a. Un error de análisis y un límite del arnés que resultó no ser permanente, que
+es lo que esta sección tiene que contar.
 
 ### La primera corrida sobre Linux: verde, y sin nada que anotar del motor
 
@@ -886,6 +888,83 @@ workflow queda sin ejercitar, y **el criterio "CI en verde" de la sec. 10 sigue 
 cumplirse**. Conviene que quede escrito así y no como un detalle administrativo: un workflow
 que nunca corrió es exactamente igual de fiable que un test que nunca corrió.
 
+### La fila 5a: un límite que se creía de la plataforma y era del arnés
+
+Durante cinco fases, la fila 5a del argumento de correctitud —el corte entre el `Open` de la
+generación nueva del WAL y el `fsync` del directorio de la rotación— fue la única de las diez
+sin cobertura por inyección de fallos. La razón escrita en `TESTING.md` mezclaba dos cosas: que
+en Windows `dir.Sync()` es un no-op (D10), que es de la plataforma y no tiene arreglo, y que
+"el disco falso hace la creación de un archivo duradera en el acto", que es del arnés y sí lo
+tenía. La primera hacía de coartada de la segunda.
+
+El arreglo son unas doscientas líneas en `fsxtest`, buena parte comentario. `DirVolatil`
+extiende a la **entrada de directorio** lo que `Volatil` ya hacía con el contenido: crear y
+borrar un archivo dejan de ser duraderos
+hasta `dir.Sync()`, y `cae()` decide con la misma semilla cuáles llegaron al plato. Hizo falta
+además un segundo disparador de la caída: `CaeEn` cuenta `WriteAt`, y en esa ventana no se
+escribe un solo byte. `CaeEnEventos` toma una **secuencia** de eventos de la traza —secuencia y
+no evento suelto porque `dir:sync` ocurre dos veces por rotación y hay que decir cuál.
+
+**El estado que produce es el que ninguna otra prueba alcanzaba.** La meta se escribe y
+sincroniza en los pasos 3 y 4 del checkpoint con `Epoca = actual+1`, antes de que el paso 5
+rote. Si la caída llega en la ventana, en el disco queda **una meta que nombra una generación
+que no existe**, con la vieja todavía presente porque su borrado va después del `fsync`. Al
+reabrir, `Open` crea vacía la generación que la meta nombra, no se reproduce nada, y eso es
+seguro porque el paso 2 ya bajó a `datos.db` todo lo que el log tenía que aportar.
+
+`TestCaidaEntreLaCreacionDelLogYElFsyncDelDirectorio` lo corre con semillas `0xF65A00`+0..19,
+cortando en la creación de la generación 50 —con 90 claves confirmadas por corrida— y las tres
+verificaciones de la sec. 9.2 en verde en las veinte. Las dos salidas del azar ocurren: la
+generación nueva sobrevive en 12 semillas y se pierde en 8. Sin eso el test estaría comprobando
+la mitad fácil y diciendo que comprueba las dos. En `internal/wal` quedan los dos cortes de la
+rotación por separado, uno por fila: la 5a antes del `fsync` de la creación y la 5b antes del
+`fsync` del borrado.
+
+**Cero errores del motor.** El camino ya estaba bien y ahora está probado, que no es lo mismo
+que estar bien por casualidad: lo que sostenía la fila era el orden de las llamadas más las
+defensas 1 y 2 de la sec. 7.4, y eso seguía siendo un argumento, no una corrida.
+
+### El barrido de los 500 no se movió, y así se comprobó
+
+El modo nuevo viene apagado y el barrido de la sec. 9.2 corre sin él. La razón es que
+encenderlo cambia lo que sobrevive a cada caída, y la tabla de 500 filas está calibrada sin
+las entradas de directorio; meterlas ahí es una decisión que merece su propio análisis, no un
+efecto colateral de este cambio.
+
+Pero "viene apagado" no basta: el proceso de las entradas sale del **mismo** `rand` sembrado
+que el descarte, el reordenamiento y el desgarro, así que tomar un número de más habría corrido
+el flujo y cambiado el estado de las 500 filas sin que ningún test se pusiera en rojo —el
+barrido seguiría pasando, solo que probando otra cosa. Por eso `caenLasEntradas` va **al final**
+de `cae()` y sale antes de tocar `r` si `DirVolatil` está apagado.
+
+Comprobado y no supuesto, con un test desechable que recorre los 500 puntos y resume en un
+sha256 el contenido duradero de todos los archivos de cada uno:
+
+```
+antes  (HEAD ecbfc37): 8bb2983d9925b4dc280b12fdca304506c688adfb1872e6cf4455e964a90fb5cd
+después (árbol de trabajo): 8bb2983d9925b4dc280b12fdca304506c688adfb1872e6cf4455e964a90fb5cd
+```
+
+Idéntica. Un verde de la suite habría sido compatible con haber movido los 500 estados; esto
+no. La misma clase de comprobación que la F4 tuvo que hacer sobre `cae()`, por la misma razón.
+
+### Un test que decía comprobar algo que ya no comprobaba
+
+`TestTrasLaCaidaTodoDevuelveErrCaido` afirma que tras la caída toda operación devuelve
+`ErrCaido` —"el proceso está muerto"—, pero pedía el handle **después** de la caída:
+
+```go
+f, _ := d.Open("datos.db")
+```
+
+`Open` era la única operación del disco falso que no miraba `d.Caido`, así que devolvía un
+archivo utilizable a un proceso muerto y el test descartaba el error con `_`. Al hacer que
+`Open` devuelva `ErrCaido` como todo lo demás, el test reventó: `f` era nil y la primera
+llamada murió con un nil pointer dereference. Ahora toma el handle antes de la caída y
+comprueba además `Open` y `Remove`, que es lo que su propio comentario decía. No es un error
+del motor —`fsxtest` no se distribuye— pero sí uno del aparato de verificación, que es la
+clase que la sec. 9.1 declara más grave.
+
 ### Lo que esta fase no prueba, todavía
 
 - **El detector de carreras.** `go test -race` sigue sin haberse ejecutado ni una vez sobre
@@ -898,7 +977,9 @@ que nunca corrió es exactamente igual de fiable que un test que nunca corrió.
   `fsync` que cuesta lo que cuesta ahí. Lo que la corrida demuestra es que el código pasa por
   el camino POSIX de `internal/fsx` sin romperse, no que lo haga con estos tiempos en otra
   parte.
-- **La fila 5a del argumento de correctitud.** Sigue sin cobertura por inyección de fallos, y
-  correr en Linux no la añade: lo que falta es que el disco falso pueda modelar la creación
-  de un archivo como una operación con caché, y eso es del arnés, no de la plataforma
-  (`TESTING.md`, sec. 3.4).
+- **La fila 5a dentro del barrido.** Ya tiene cobertura por inyección de fallos, pero en un
+  test aparte con veinte semillas, no en las 500 filas de la sec. 9.2, que siguen corriendo
+  con `DirVolatil` apagado. Encenderlo allí queda como decisión abierta.
+- **El `fsync` de directorio real.** Lo que la fila 5a ejercita ahora es el **modelo** de la
+  operación. En Windows la de verdad no existe (D10), y correrla es del CI de Linux, no del
+  arnés.

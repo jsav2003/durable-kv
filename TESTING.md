@@ -49,7 +49,7 @@ hecho y lo que encontraron están en `BUGS.md` (718.939 ejecuciones de `FuzzArbo
 
 ## 2. Las seis capas, y qué caza cada una
 
-180 funciones de test y 5 objetivos de fuzz, repartidos así:
+190 funciones de test y 5 objetivos de fuzz, repartidos así:
 
 | Capa | Qué caza | Dónde vive | Qué no ve |
 |---|---|---|---|
@@ -191,11 +191,20 @@ está en juego; las tres salidas de D11 siguen sobre la mesa.
 
 ### 3.4 Lo que el disco falso no modela
 
-- **La creación de un archivo no es una operación con caché.** `Open` crea el archivo en el
-  acto y de forma duradera, así que una caída entre el `Open` de la generación nueva del WAL
-  y el `dir.Sync()` de la rotación no se puede provocar. `Rotar` ordena las dos cosas y hay
-  un test de la F3 de que las ordena, pero el barrido no lo ejercita. Es la única fila de las
-  diez de la sec. 4.1 sin cobertura por inyección de fallos.
+- **La creación de un archivo, en el barrido.** Lo estuvo del todo hasta la F6: `Open` creaba
+  el archivo de forma duradera en el acto y la ventana entre el `Open` de la generación nueva
+  del WAL y el `dir.Sync()` de la rotación no existía. Ahora el disco falso sabe modelarla
+  —`fsxtest.DirVolatil` deja la creación y el borrado de un archivo pendientes hasta el
+  `fsync` del directorio, y `cae()` decide con la misma semilla cuáles llegaron al plato—,
+  pero **el barrido de los 500 puntos corre con eso apagado**. Quien la ejercita es un test
+  aparte, `TestCaidaEntreLaCreacionDelLogYElFsyncDelDirectorio`, con sus propias semillas.
+
+  La separación es deliberada: encender el modo cambia lo que sobrevive a cada caída, y la
+  tabla de la sec. 9.2 está calibrada sin él. Que el barrido siga dando exactamente el mismo
+  resultado no es una suposición: la huella de los 500 estados duraderos es la misma antes y
+  después del cambio (sha256 `8bb2983d…`), porque las entradas de directorio se deciden al
+  final de `cae()` y no mueven el flujo del `rand` que consumen el descarte, el reordenamiento
+  y el desgarro. Meterlas en el barrido es una decisión abierta, no una tarea pendiente.
 - **El disco no corrompe un sector ya escrito.** Solo descarta, reordena y desgarra
   escrituras **sin sincronizar**. Un bit que se voltea en un sector que ya estaba en el plato
   es otra clase de fallo, y lo cubren los tests de corrupción de un bit de la F1 y la F3
@@ -226,8 +235,8 @@ recuperación si la caída ocurre justo antes y justo después. Diez casos.
 | 3b | después, antes de rotar | la meta dice época N+1 y en el directorio solo está `datos.wal.N`: no se reproduce nada, y es correcto, porque el paso 2 ya bajó todo lo que el log tenía que aportar. Si el LSN no avanzó entre los dos checkpoints, el desempate por época es lo único que impide elegir la meta vieja | `recovery.TestElPaso10DejaLaMetaAlDiaYElLogLimpio`, `meta.TestConElMismoLSNGanaLaEpocaMasAlta` (D12) | correcto |
 | 4a | antes del `fsync` de la extensión de `datos.db` (sec. 7.6) | las páginas cero pueden no ser duraderas, pero el commit del grupo que usa la página nueva todavía no existe: nada confirmado depende de ellas. Y la recuperación calcula el `page_id` máximo de las imágenes y extiende explícitamente antes de aplicar (paso 5) | `pager.TestExtensionAntesDelCommit`, `recovery.TestElArchivoSeExtiendeHastaElTotalPagesConfirmado`, `recovery.TestLasPaginasDelHuecoSeEscribenAntesDeAplicarImagenes` | **fallaba** (H12) |
 | 4b | después, antes del commit | el archivo mide lo que promete y esas ranuras quedan sin dueño; al reabrir, `ReconstruirLibres` las declara libres y `comprobarLibres` las acepta por estar enteramente a ceros | `recovery.TestUnaPaginaLibreACerosEsLegitima`, `recovery.TestUnaPaginaLibreIlegibleSeDetecta`, criterio (a) del barrido | correcto (D11) |
-| 5a | antes del `fsync` del directorio en la rotación (paso 5) | `datos.wal.N+1` puede no existir de forma duradera. `Rotar` crea, sincroniza el directorio y **solo entonces** borra el viejo, así que lo peor es que falte la N+1 y siga la N: la meta apunta a una generación ausente y no se reproduce nada, lo que es seguro porque el paso 2 ya bajó todo | `wal.TestRotarCreaAntesDeBorrar`, `fsx.TestSyncDelDirectorio` | **fallaba** (H7) |
-| 5b | después, tras borrar el viejo | puede quedar la generación **vieja** sin borrar. El estado a reproducir es "existen la N y la N+1, y la meta dice N+1": la huérfana es la vieja, y se barre | `recovery.TestSeBarreLaGeneracionHuerfanaDeUnaRotacionAMedias`, `recovery.TestNoSeAcumulanGeneracionesDelLog` | **fallaba** (H7) |
+| 5a | antes del `fsync` del directorio en la rotación (paso 5) | `datos.wal.N+1` puede no existir de forma duradera. `Rotar` crea, sincroniza el directorio y **solo entonces** borra el viejo, así que lo peor es que falte la N+1 y siga la N: la meta apunta a una generación ausente y no se reproduce nada, lo que es seguro porque el paso 2 ya bajó todo | `wal.TestRotarCreaAntesDeBorrar`, `wal.TestRotarConCaidaAntesDelSyncDelDirectorio`, `TestCaidaEntreLaCreacionDelLogYElFsyncDelDirectorio`, `fsx.TestSyncDelDirectorio` | **fallaba** (H7) |
+| 5b | después, tras borrar el viejo | puede quedar la generación **vieja** sin borrar. El estado a reproducir es "existen la N y la N+1, y la meta dice N+1": la huérfana es la vieja, y se barre | `recovery.TestSeBarreLaGeneracionHuerfanaDeUnaRotacionAMedias`, `wal.TestRotarConCaidaAntesDelSyncDelBorrado`, `recovery.TestNoSeAcumulanGeneracionesDelLog` | **fallaba** (H7) |
 
 **Los cuatro que la versión 1 fallaba.** No es una cifra redonda por casualidad: son los
 cuatro cortes que `docs/REVIEW-01.md` convirtió en hallazgos. El quinto `fsync` —el de
@@ -255,12 +264,24 @@ checkpoint estaba correcto desde el principio.
   CRC inválido no disparaba nunca. La rotación, el LSN monótono con contigüidad y el campo
   `epoca` son tres defensas para lo mismo, y se usan las tres.
 
-**El límite de esta prueba, dicho sin adornos.** La fila 5a es la única de las diez que ningún
-test ejercita con inyección de fallos: el disco falso hace la creación de un archivo duradera
-en el acto (sec. 3.4) y en Windows `dir.Sync()` es un no-op documentado
-(`docs/DEUDA-DISENO.md`, D10). Lo que sostiene esa fila hoy es el **orden de las llamadas**,
-que la traza compartida sí ve, más las defensas 1 y 2 de la sec. 7.4. El camino real se
-ejercita en el CI de Linux.
+**La fila 5a, que fue el límite de esta prueba durante cinco fases.** Era la única de las diez
+que ningún test ejercitaba con inyección de fallos, y lo que la sostenía era el **orden de las
+llamadas** —que la traza compartida sí ve— más las defensas 1 y 2 de la sec. 7.4. No era un
+límite de la plataforma sino del arnés: el disco falso hacía la creación de un archivo duradera
+en el acto, así que la ventana no existía.
+
+Desde la F6 existe. `TestCaidaEntreLaCreacionDelLogYElFsyncDelDirectorio` corta entre el `Open`
+de la generación 50 y el `fsync` del directorio, con 90 claves confirmadas por corrida, y deja
+el estado que ninguna otra prueba alcanza: **la meta dice época N+1 —se escribió y sincronizó en
+los pasos 3 y 4, antes de rotar— y en el directorio solo está la N**. Al reabrir, la generación
+que la meta nombra no existe, `Open` la crea vacía, no se reproduce nada, y eso es seguro porque
+el paso 2 ya bajó a `datos.db` todo lo que el log tenía que aportar. Las dos salidas del azar
+—la generación nueva sobrevive o se pierde— se recorren las dos: en veinte semillas, 12 y 8.
+Cero errores del motor.
+
+Lo que sigue sin ejercitarse aquí es el `dir.Sync()` **real**, que en Windows es un no-op
+documentado (`docs/DEUDA-DISENO.md`, D10). Eso es de la plataforma, no del arnés, y su sitio es
+el CI de Linux.
 
 ### 4.2 Prueba de la partición
 
@@ -368,9 +389,10 @@ Reunido de las seis fases. Cada punto está desarrollado en la sección correspo
   de libres solo se llena por extensión del archivo, así que **todo lo que este motor demuestra
   es sobre un árbol que solo crece**. Es la limitación más grande de la lista y afecta por igual
   a la F2, la F3, la F4 y la F5.
-- **La caída durante la creación de un archivo.** El disco falso la hace duradera en el acto: la
-  ventana entre el `Open` de la generación nueva y el `fsync` del directorio no se puede provocar
-  (fila 5a de la sec. 4.1).
+- **La caída durante la creación de un archivo, dentro del barrido.** El disco falso ya sabe
+  modelarla (`DirVolatil`), y la fila 5a tiene su test de inyección desde la F6, pero el barrido
+  de los 500 puntos corre con el modo apagado para no mover la tabla de la sec. 9.2. Lo que
+  cubre esa fila es un test aparte y sus veinte semillas, no las 500 filas.
 - **La degradación del medio.** El disco falso no voltea bits en sectores ya escritos; eso lo
   cubren los tests de corrupción de un bit, que son otra cosa.
 - **El `fsync` de directorio real.** No existe en Windows (D10). Queda para el CI de Linux.

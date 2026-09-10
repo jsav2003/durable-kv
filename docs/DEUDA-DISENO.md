@@ -9,18 +9,18 @@ Este archivo se actualiza al cerrar cada fase.
 
 | # | Decisión | Refleja en | Fase | Estado |
 |---|---|---|---|---|
-| D1 | Campo de longitud explícito en el marco de registro | sec. 7.3 | F3 | pendiente |
-| D2 | CRC32 con polinomio Castagnoli | sec. 5.1 y 7.3 | F1 / F3 | pendiente |
-| D3 | Los 4 bytes sin nombrar de la cabecera de página son relleno | sec. 5.1 | F1 | **decidida**, pendiente de reflejar |
+| D1 | Campo de longitud explícito en el marco de registro | sec. 7.3 | F3 | **reflejada** en la F6 |
+| D2 | CRC32 con polinomio Castagnoli | sec. 5.1 y 7.3 | F1 / F3 | **reflejada** en la F6 |
+| D3 | Los 4 bytes sin nombrar de la cabecera de página son relleno | sec. 5.1 | F1 | **reflejada** en la F6 |
 | D4 | El caché del pager no está acotado; la regla de desalojo vive en la escritura | sec. 7.5 | F3 | **cerrada** en la F3 |
-| D5 | El campo `libre` de la cabecera es derivable de `nceldas`: se escribe, no se lee | sec. 5.1 | F2 | **decidida**, pendiente de reflejar |
+| D5 | El campo `libre` de la cabecera es derivable de `nceldas`: se escribe, no se lee | sec. 5.1 | F2 | **reflejada** en la F6 |
 | D6 | `Key` y `Value` devuelven subsectores de la página, no copias | — | F3 | **cerrada** en la F3 |
-| D7 | La derivación del tope de 1000 bytes no descuenta el directorio de slots | sec. 4 y `NO-GOALS.md` | F2 | **decidida**, pendiente de reflejar |
+| D7 | La derivación del tope de 1000 bytes no descuenta el directorio de slots | sec. 4 y `NO-GOALS.md` | F2 | **reflejada** en la F6 |
 | D8 | `Validate()` no comprueba el CRC de las páginas libres | sec. 6 | F3 | **cerrada** en la F3, con el matiz de D11 |
 | D9 | Un `Put` que falla a medias deja el grupo abierto: no hay camino de aborto | sec. 7.3 | sin asignar | **sigue abierta**, análisis revisado |
 | D10 | El `fsync` de directorio no existe en Windows: no-op documentado | sec. 7.4 | F3 | **decidida**, limitación permanente |
 | D11 | El invariante 6 no puede ser cierto para una ranura materializada por extensión | sec. 6 y 7.6 | **la decides tú** | contradicción del diseño consigo mismo; la F4 añadió evidencia, no decisión |
-| D12 | La regla de elección entre las dos metas no cubre el empate de LSN | sec. 5.2 | F5 | **decidida** en la F5, pendiente de reflejar |
+| D12 | La regla de elección entre las dos metas no cubre el empate de LSN | sec. 5.2 | F5 | **reflejada** en la F6 |
 
 ## D1 · El marco de registro lleva un campo de longitud explícito
 
@@ -535,3 +535,29 @@ dicho aquí porque es la clase de optimización que parece gratis.
 
 **Fase.** Decidida en la F5 y ya implementada. **Pendiente de reflejar** en la sec. 5.2 del
 `DESIGN.md`, junto con D1, D2, D3, D5 y D7, en la F6.
+
+---
+
+## Cierres de la F6
+
+Las seis que quedaban pendientes de reflejar están ya en el `DESIGN.md`. Ninguna cambió de
+contenido al plegarse: lo que se llevó al documento es el texto que cada entrada proponía en
+su apartado *Dónde reflejarlo*, y cada afirmación se contrastó contra el código antes de
+escribirla.
+
+| # | Dónde quedó | Qué se comprobó en el código |
+|---|---|---|
+| D1 | sec. 7.3, los dos diagramas más un párrafo del porqué | `record.headerSize` = `lsn(8)+tipo(1)+epoca(4)+longitud(4)` |
+| D2 | sec. 5.1 y 7.3, nombrando el polinomio | `crc32.MakeTable(crc32.Castagnoli)` en `page` y en `record` |
+| D3 | sec. 5.1, el campo en la lista y el offset 28 en el diagrama | `page.offPadding = 28`, `HeaderSize = 40`, y el relleno a cero en `EncodeTo` |
+| D5 | sec. 5.1, en la descripción de `libre_fin (2), libre (2)` | `node.syncFree`: `HeaderSize + SlotSize*nceldas` |
+| D7 | sec. 4 y `NO-GOALS.md`, la aritmética corregida a 4048 / 4 = 1012 | el tope de 1000 no cambia; `TestCuatroCeldasDeMilBytes` sigue en verde |
+| D12 | sec. 5.2, el desempate por época y su condición | `meta`: `a.Epoca > b.Epoca` en el empate |
+
+**Lo que D12 deja atado, y conviene no perder de vista:** la sec. 5.2 ahora depende de que la
+rotación del paso 5 de la sec. 7.4 siga siendo **incondicional**. Está dicho en las dos
+secciones a propósito, porque es la clase de optimización que parece gratis.
+
+**Siguen abiertas D9 y D11**, y las dos son decisiones tuyas, no tareas pendientes de
+redacción. D11 en particular es una contradicción del diseño consigo mismo y el `DESIGN.md`
+no se puede cerrar de verdad sin ella.

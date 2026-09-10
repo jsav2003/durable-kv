@@ -27,7 +27,8 @@ devuelve `ErrEntryTooLarge` si se excede.
 
 El número se deriva del objetivo de llenado, no de la comodidad: para que una hoja llena
 siempre pueda dividirse en dos mitades razonablemente ocupadas hacen falta al menos cuatro
-celdas por página; 4096 − 40 de cabecera = 4056 útiles, y 4056 / 4 ≈ 1014.
+celdas por página; 4096 − 40 de cabecera = 4056, menos 2 bytes de slot por celda = 4048 para
+las celdas, y 4048 / 4 = 1012. El tope de 1000 queda por debajo con holgura.
 
 La versión 1 del diseño afirmaba "valor hasta 1 MB … cabe holgadamente en una página", lo
 cual es falso por un factor de 256, y sobre esa afirmación se justificaba precisamente no

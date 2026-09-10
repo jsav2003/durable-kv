@@ -77,7 +77,16 @@ cabecera de celda` no puede pasar de **1000 bytes**. `Put` devuelve
 El número no es arbitrario y no se elige por comodidad: se deriva del objetivo de
 llenado de la sec. 6. Para que una hoja llena siempre pueda dividirse en dos mitades
 razonablemente ocupadas hacen falta al menos cuatro celdas por página. Con 4096 bytes
-menos 40 de cabecera quedan 4056 útiles, y 4056 / 4 ≈ 1014. De ahí el tope.
+menos 40 de cabecera quedan 4056, y de ahí hay que descontar el **directorio de slots**,
+que son 2 bytes por celda (sec. 5.1): con cuatro celdas, 4056 − 8 = 4048 bytes para las
+celdas, y 4048 / 4 = **1012**. El tope de 1000 queda por debajo con 12 bytes de holgura
+por celda. De ahí el número, redondeado a la baja.
+
+> La aritmética original de este párrafo daba 4056 / 4 ≈ 1014 porque no descontaba los
+> slots. El tope no cambia —1000 sigue por debajo de la cota real—, pero la cota sí: quien
+> subiera el límite apoyándose en el 1014 obtendría una página donde la cuarta celda no
+> entra, y el fallo aparecería como una división que no puede progresar, no como un error
+> de tamaño (D7).
 
 > La versión 1 de este documento decía "valor hasta 1 MB" y afirmaba que cabía
 > holgadamente en una página de 4096 bytes. No es una errata menor: era la premisa que
@@ -110,10 +119,10 @@ lectura y de escritura: nunca se lee ni se escribe menos que una página complet
 Cabecera de **40 bytes**:
 
 ```
-byte 0     4          12         20     21      22        24        26      32      40
-    +------+----------+----------+------+-------+---------+---------+-------+-------+
-    | crc32| page_id  | page_lsn | tipo | flags | nceldas | libre_f | libre |enlace |
-    +------+----------+----------+------+-------+---------+---------+-------+-------+
+byte 0     4          12         20     21      22        24        26     28      32      40
+    +------+----------+----------+------+-------+---------+---------+------+-------+-------+
+    | crc32| page_id  | page_lsn | tipo | flags | nceldas | libre_f | libre|relleno| enlace|
+    +------+----------+----------+------+-------+---------+---------+------+-------+-------+
     | slot0 | slot1 | slot2 | ...                                          | ← crece →
     +---------------------------------------------------------------------+
     |                       espacio libre                                  |
@@ -123,7 +132,10 @@ byte 0     4          12         20     21      22        24        26      32  
                                                                      byte 4096
 ```
 
-- **crc32 (4):** checksum de los 4092 bytes restantes. Es lo que permite distinguir
+- **crc32 (4):** checksum de los 4092 bytes restantes, **CRC32 con el polinomio
+  Castagnoli** (`hash/crc32` de la sec. 3; sigue siendo librería estándar). Es el mismo
+  polinomio en toda la base —páginas y registros del log— y se fija aquí para que no
+  aparezcan dos implementaciones distintas en fases distintas. Es lo que permite distinguir
   "página válida" de "página escrita a medias". Sin esto leerías basura y le creerías.
 - **page_id (8):** el número de página que esta página *cree* ser. Al leer la página N
   se verifica `page_id == N` además del CRC. **El CRC valida contenido, no ubicación:**
@@ -136,7 +148,17 @@ byte 0     4          12         20     21      22        24        26      32  
 - **tipo (1):** 1 = nodo interno, 2 = hoja, 3 = meta.
 - **flags (1):** reservado.
 - **nceldas (2):** cuántas entradas contiene.
-- **libre_fin (2), libre (2):** frontera del espacio libre.
+- **libre_fin (2), libre (2):** frontera del espacio libre. `libre` es el final del
+  directorio de slots y **es derivable**: vale siempre `40 + 2·nceldas`. Se escribe porque
+  el formato lo declara, pero no se lee como fuente de verdad; se deriva al mutar. Que
+  discrepe de `nceldas` no es una variante válida del formato sino una página mal formada,
+  y así lo trata la comprobación de integridad. No se elimina del layout a propósito:
+  quitarlo obligaría a mover `libre_fin`, a contradecir el diagrama y a rehacer la
+  aritmética de la sec. 4, y un campo redundante pero verificado es más barato que un
+  cambio de layout (D5).
+- **relleno (4):** reservado, siempre a cero. Está cubierto por el CRC, así que su valor
+  es conocido en toda página escrita con esta versión del formato: el día que se convierta
+  en un campo con significado, no hay páginas antiguas con basura en él (D3).
 - **enlace (8):** para `tipo=1`, el puntero al **hijo más a la derecha**. Para `tipo=2`,
   el puntero a la **hoja siguiente**. Ambos son obligatorios y en la versión 1 no
   existían en el layout: un nodo con *n* claves separadoras tiene *n+1* hijos, y con un
@@ -160,8 +182,22 @@ LSN del último checkpoint.
 
 **Se usan dos, alternadas.** Al hacer checkpoint se escribe siempre sobre la más
 antigua. Al abrir, se leen ambas, se descartan las que fallen el CRC o el `page_id`, y
-se elige la válida con el LSN más alto. Si te caes escribiendo una meta, la otra sigue
-intacta. Es la misma técnica que usa BoltDB.
+se elige la válida con el LSN más alto; **si las dos empatan en LSN, gana la de época más
+alta**. Si te caes escribiendo una meta, la otra sigue intacta. Es la misma técnica que
+usa BoltDB.
+
+**El empate no es un caso raro y la regla del LSN sola no lo resuelve.** El LSN de una meta
+es el del último checkpoint, así que dos checkpoints sin ningún commit por medio escriben el
+mismo LSN en las dos ranuras — lo produce abrir y cerrar una base sin tocarla. Con las dos
+empatadas, "la del LSN más alto" no elige, y elegir mal significa quedarse con una meta vieja
+que nombra una generación del WAL que la rotación ya borró: la recuperación abre un log
+inexistente y arranca una base sin los `Put` confirmados desde ese checkpoint. Pérdida
+silenciosa de datos confirmados, contra la garantía de la sec. 4 (D12).
+
+El desempate por época no necesita un contador nuevo porque **el paso 5 de la sec. 7.4 rota
+el WAL en todo checkpoint, sin condición**, así que la época crece una vez por cada escritura
+de meta. Eso convierte a la rotación incondicional en parte de esta garantía: un checkpoint
+que decidiera no rotar cuando no hay nada que bajar dejaría el desempate sin desempatar.
 
 Dos reglas que la versión 1 no tenía y sin las cuales la alternancia no sirve de nada:
 
@@ -312,10 +348,20 @@ El log guarda **imágenes completas de página**, no descripciones lógicas de l
 operación:
 
 ```
-imagen:  | lsn (8) | tipo=1 (1) | epoca (4) | page_id (8) | 4096 bytes | crc32 (4) |
-commit:  | lsn (8) | tipo=2 (1) | epoca (4) | n_registros (4)
+imagen:  | lsn (8) | tipo=1 (1) | epoca (4) | long (4) | page_id (8) | 4096 bytes | crc32 (4) |
+commit:  | lsn (8) | tipo=2 (1) | epoca (4) | long (4) | n_registros (4)
                    | root_id (8) | free_head (8) | total_pages (8) | crc32 (4) |
 ```
+
+**El campo `long` es explícito aunque los dos registros sean de tamaño fijo dado el tipo.**
+Con él, el lector delimita y valida un registro **sin conocer su tipo ni su semántica**: hace
+significativo el fuzzing que pide la sec. 9.4 —un fuzzer que solo probara dos tamaños fijos
+apenas ejercitaría el formato— y evita que un tipo de registro nuevo, el día que aparezca,
+corte una recuperación en seco por no saber cuánto leer. Es además lo que hace que el criterio
+de terminación de la F0 —registros de **longitud variable**— tenga sentido sobre este formato.
+Cuesta 4 bytes sobre 4121 en una imagen de página, un 0,1% (D1).
+
+El `crc32` es, como el de la página, **CRC32 con el polinomio Castagnoli** (D2).
 
 **Por qué la imagen completa y no "insertar clave X con valor Y":** el log lógico es
 mucho más compacto, pero para reaplicarlo necesitas que el árbol de partida esté en un

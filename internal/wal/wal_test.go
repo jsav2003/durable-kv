@@ -356,6 +356,97 @@ func TestRotarCreaAntesDeBorrar(t *testing.T) {
 	}
 }
 
+// El gemelo inyectado del anterior: el corte de la fila 5a del argumento de correctitud
+// (TESTING.md, sec. 4.1), que hasta que el disco falso supo modelar la entrada de directorio
+// no se podía provocar. TestRotarCreaAntesDeBorrar comprueba el **orden** de las llamadas;
+// este comprueba qué queda en el disco si la caída ocurre en medio.
+//
+// La ventana es la que va del Open de la generación nueva al fsync del directorio. Lo que la
+// fila afirma es que lo peor que puede pasar es que falte la N+1 y siga la N -- nunca al
+// revés, y nunca ninguna de las dos --, porque el borrado de la vieja va después del fsync.
+// Eso vale para las dos salidas del azar, así que el test las recorre las dos.
+func TestRotarConCaidaAntesDelSyncDelDirectorio(t *testing.T) {
+	vistas := map[bool]int64{}
+
+	for semilla := int64(0); semilla < 30; semilla++ {
+		d := fsxtest.Nuevo()
+		d.Volatil = true
+		d.DirVolatil = true
+		d.Semilla = semilla
+		w, err := wal.Abrir(d, 0, 0, 0)
+		if err != nil {
+			t.Fatalf("Abrir: %v", err)
+		}
+		grupo(t, w, pager.State{RootID: 2, TotalPages: 4}, 2)
+		if err := w.Sync(); err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		// El directorio ya tiene su fsync, así que la generación 0 es duradera: lo que la
+		// caída decidirá es solo la suerte de la nueva.
+		if err := d.Sync(); err != nil {
+			t.Fatalf("dir.Sync: %v", err)
+		}
+		d.CaeEnEventos = []string{wal.Nombre(1) + ":create", "dir:sync"}
+
+		if err := w.Rotar(); !errors.Is(err, fsxtest.ErrCaido) {
+			t.Fatalf("semilla %d: Rotar = %v, quiero ErrCaido en el fsync del directorio", semilla, err)
+		}
+
+		n := d.Reabrir()
+		if !n.Existe(wal.Nombre(0)) {
+			t.Fatalf("semilla %d: falta la generación vieja, que es la única copia buena de lo confirmado",
+				semilla)
+		}
+		if got := n.Bytes(wal.Nombre(0)); len(got) == 0 {
+			t.Fatalf("semilla %d: la generación vieja quedó vacía", semilla)
+		}
+		vistas[n.Existe(wal.Nombre(1))] = semilla
+	}
+
+	// Y que las dos salidas ocurran de verdad: si la creación sobreviviera siempre, este
+	// test estaría comprobando la mitad de lo que dice comprobar.
+	if len(vistas) != 2 {
+		t.Errorf("en treinta semillas la generación nueva siempre %v: el azar no está decidiendo nada",
+			len(vistas) == 1)
+	}
+}
+
+// La otra mitad de la rotación, la fila 5b: si la caída llega tras el borrado de la vieja
+// pero antes de su fsync, el borrado puede no haber ocurrido y quedan las dos generaciones.
+// Es el estado que barrerGeneracionesViejas limpia al recuperar.
+func TestRotarConCaidaAntesDelSyncDelBorrado(t *testing.T) {
+	dos := false
+	for semilla := int64(0); semilla < 30 && !dos; semilla++ {
+		d := fsxtest.Nuevo()
+		d.Volatil = true
+		d.DirVolatil = true
+		d.Semilla = semilla
+		w, err := wal.Abrir(d, 0, 0, 0)
+		if err != nil {
+			t.Fatalf("Abrir: %v", err)
+		}
+		grupo(t, w, pager.State{RootID: 2, TotalPages: 4}, 2)
+		w.Sync()
+		d.Sync()
+		// El corte es el segundo fsync del directorio de Rotar, el que sigue al borrado.
+		d.CaeEnEventos = []string{wal.Nombre(0) + ":remove", "dir:sync"}
+
+		if err := w.Rotar(); !errors.Is(err, fsxtest.ErrCaido) {
+			t.Fatalf("semilla %d: Rotar = %v, quiero ErrCaido", semilla, err)
+		}
+
+		n := d.Reabrir()
+		if !n.Existe(wal.Nombre(1)) {
+			t.Fatalf("semilla %d: falta la generación nueva, que ya tenía su fsync de directorio",
+				semilla)
+		}
+		dos = n.Existe(wal.Nombre(0))
+	}
+	if !dos {
+		t.Error("en treinta semillas el borrado siempre llegó al disco: la fila 5b no se está ejercitando")
+	}
+}
+
 // El LSN no se reinicia al rotar (defensa 1 de la sec. 7.4), pero la época sí avanza y el
 // archivo nuevo empieza vacío.
 func TestRotarConservaElLSNYAvanzaLaEpoca(t *testing.T) {

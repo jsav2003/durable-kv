@@ -8,6 +8,7 @@ import (
 
 	motor "github.com/jsav2003/motor-almacenamiento"
 	"github.com/jsav2003/motor-almacenamiento/internal/fsx/fsxtest"
+	"github.com/jsav2003/motor-almacenamiento/internal/wal"
 )
 
 // Este archivo es el criterio de terminación de la F4, tal como lo pide la tabla de la
@@ -30,10 +31,10 @@ import (
 //     WAL cuyo fsync no retornó puede sobrevivir porque el sistema volcó esos bytes por
 //     su cuenta.
 //
-// Lo que este arnés NO modela está en BUGS.md, sección F4: la creación de un archivo es
-// duradera en el acto (no hay caída entre el open y el fsync del directorio), y el disco
-// no corrompe un sector ya escrito, solo descarta, reordena y desgarra escrituras sin
-// sincronizar.
+// Lo que este arnés NO modela está en BUGS.md, sección F4: el disco no corrompe un sector
+// ya escrito, solo descarta, reordena y desgarra escrituras sin sincronizar. La creación de
+// un archivo sí se puede modelar desde la F6 (fsxtest.DirVolatil), pero el barrido corre con
+// ella apagada: el segundo test de este archivo la enciende aparte.
 
 // semillaBase fija toda la corrida. El punto de caída N usa semillaBase+N, así que cada
 // fila de la tabla es reproducible por separado y la tabla entera desde esta única
@@ -172,5 +173,149 @@ func TestQuinientosPuntosDeCaida(t *testing.T) {
 				t.Fatalf("(c) Scan tras la caída en %d (semilla=%d): %v", n, semilla, err)
 			}
 		})
+	}
+}
+
+// semilla5a fija el segundo test. Va aparte de semillaBase para que el barrido de arriba y
+// el corte de la fila 5a no se pisen la reproducibilidad.
+const semilla5a int64 = 0xF6_5A00
+
+// epoca5a es la generación del WAL en cuya creación se corta, y el número está elegido.
+//
+// No es la 1: esa la crea el checkpoint del paso 10 durante la apertura, y una caída ahí no
+// tendría ni una sola clave confirmada que exigir. Tampoco una de las primeras: con el
+// umbral de umbralCaida la carga limpia crea 101 generaciones para sus 180 claves --el log
+// de un Put pasa de los 6000 bytes casi por sí solo--, así que cortar en la 3 dejaría un
+// árbol de una hoja y cuatro claves. En la 50 el árbol ya se dividió varias veces y hay
+// cerca de noventa claves confirmadas que exigir, que es cuando la fila dice algo.
+const epoca5a = 50
+
+// minConfirmadas5a es el guardarraíl del número anterior. Si un cambio en el motor adelanta
+// la generación 50, el test dejaría de probar lo que dice probar en silencio; así falla.
+const minConfirmadas5a = 60
+
+// El corte de la fila 5a del argumento de correctitud (TESTING.md, sec. 4.1): la caída entre
+// el Open de la generación nueva del WAL y el fsync del directorio de la rotación.
+//
+// Es la última de las diez filas que ningún test ejercitaba con inyección de fallos, y no
+// por la plataforma sino por el arnés: hasta la F6 un archivo del disco falso nacía duradero
+// y la ventana no existía. Con fsxtest.DirVolatil sí existe.
+//
+// El estado que produce es el que ninguna otra prueba alcanza: **la meta dice época N+1 y en
+// el directorio solo está la N**. La meta ya se escribió y sincronizó en los pasos 3 y 4 del
+// checkpoint, con Epoca = actual+1, antes de que el paso 5 rotara. Lo que se afirma es que
+// eso es seguro, porque el paso 2 ya bajó a datos.db todo lo que el log tenía que aportar.
+//
+// Va fuera del barrido de los 500 puntos porque enciende un modo que el barrido no usa. Las
+// dos salidas del azar -- la generación nueva sobrevive o no -- tienen que dar las tres
+// verificaciones en verde, así que el test recorre semillas hasta ver las dos.
+func TestCaidaEntreLaCreacionDelLogYElFsyncDelDirectorio(t *testing.T) {
+	if testing.Short() {
+		t.Skip("aperturas y recuperaciones repetidas: -short lo salta")
+	}
+
+	nuevaSobrevive, nuevaSePierde := 0, 0
+
+	for k := range 20 {
+		semilla := semilla5a + int64(k)
+		t.Run(fmt.Sprintf("semilla=%#x", semilla), func(t *testing.T) {
+			d := fsxtest.Nuevo()
+			d.Volatil = true
+			d.DirVolatil = true
+			d.Semilla = semilla
+			d.CaeEnEventos = []string{wal.Nombre(epoca5a) + ":create", "dir:sync"}
+
+			confirmadas := make(map[int]bool)
+			intentadas := make(map[int]bool)
+
+			db, err := motor.AbrirCon(d, umbralCaida)
+			if err != nil {
+				t.Fatalf("abrir la base (semilla=%d): %v", semilla, err)
+			}
+			for i := range nClavesCaida {
+				intentadas[i] = true
+				err := db.Put(clave(i), valorCaida(i))
+				if err == nil {
+					confirmadas[i] = true
+					continue
+				}
+				if !errors.Is(err, fsxtest.ErrCaido) {
+					t.Fatalf("Put(%d) devolvió un error que no es la caída (semilla=%d): %v",
+						i, semilla, err)
+				}
+				break
+			}
+
+			if !d.Caido {
+				t.Fatalf("la carga terminó sin que el disco cayera (semilla=%d): ¿llegó a rotar a la época %d?",
+					semilla, epoca5a)
+			}
+			if len(confirmadas) < minConfirmadas5a {
+				t.Fatalf("solo %d claves confirmadas antes del corte (semilla=%d), quiero al menos %d: la generación %d llega demasiado pronto y el test dejaría de exigir nada",
+					len(confirmadas), semilla, minConfirmadas5a, epoca5a)
+			}
+
+			t.Logf("%d claves confirmadas antes del corte; el directorio duradero es %v",
+				len(confirmadas), d.Reabrir().Nombres())
+
+			// El estado en disco, antes de tocarlo: la generación vieja sigue ahí --su borrado
+			// va después del fsync del directorio-- y la nueva está a merced de la caída.
+			n := d.Reabrir()
+			if !n.Existe(wal.Nombre(epoca5a - 1)) {
+				t.Fatalf("falta la generación %d (semilla=%d): el directorio duradero es %v",
+					epoca5a-1, semilla, n.Nombres())
+			}
+			if n.Existe(wal.Nombre(epoca5a)) {
+				nuevaSobrevive++
+			} else {
+				nuevaSePierde++
+			}
+
+			db2, err := motor.AbrirCon(n, umbralCaida)
+			if err != nil {
+				t.Fatalf("recuperar tras el corte de la 5a (semilla=%d): %v", semilla, err)
+			}
+			defer db2.Close()
+
+			// (a)
+			if err := db2.Validate(); err != nil {
+				t.Fatalf("(a) Validate tras el corte de la 5a (semilla=%d): %v", semilla, err)
+			}
+
+			// (b)
+			for i := range confirmadas {
+				got, err := db2.Get(clave(i))
+				if err != nil {
+					t.Fatalf("(b) la clave confirmada %d no está (semilla=%d): %v", i, semilla, err)
+				}
+				if !bytes.Equal(got, valorCaida(i)) {
+					t.Fatalf("(b) la clave confirmada %d tiene otro valor (semilla=%d)", i, semilla)
+				}
+			}
+
+			// (c)
+			if err := db2.Scan(nil, nil, func(k, v []byte) bool {
+				var i int
+				if _, e := fmt.Sscanf(string(k), "clave-%06d", &i); e != nil {
+					t.Fatalf("(c) clave con formato inesperado %q (semilla=%d)", k, semilla)
+				}
+				if !intentadas[i] {
+					t.Fatalf("(c) apareció la clave %d, que nunca se intentó escribir (semilla=%d)",
+						i, semilla)
+				}
+				return true
+			}); err != nil {
+				t.Fatalf("(c) Scan tras el corte de la 5a (semilla=%d): %v", semilla, err)
+			}
+		})
+	}
+
+	// Que las dos salidas ocurran. Si la creación sobreviviera siempre, el test estaría
+	// comprobando la mitad de lo que dice comprobar, y justo la mitad fácil.
+	t.Logf("la generación nueva sobrevive en %d semillas y se pierde en %d",
+		nuevaSobrevive, nuevaSePierde)
+	if nuevaSobrevive == 0 || nuevaSePierde == 0 {
+		t.Errorf("en veinte semillas solo se dio una de las dos salidas (sobrevive=%d, se pierde=%d): el azar no está decidiendo nada",
+			nuevaSobrevive, nuevaSePierde)
 	}
 }

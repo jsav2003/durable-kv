@@ -14,6 +14,13 @@
 // cola de pendientes, etiquetada por nombre de archivo; Sync de un archivo vacía solo sus
 // entradas. Esta es la base sobre la que la F4 monta el descarte, el reordenamiento y la
 // escritura desgarrada de la caída.
+//
+// DirVolatil hace lo mismo con la **entrada de directorio**: crear o borrar un archivo no es
+// duradero hasta el fsync del directorio. Es lo que vuelve provocable el corte de la fila 5a
+// del argumento de correctitud -- la ventana entre el Open de la generación nueva del WAL y
+// el dir.Sync() de la rotación de la sec. 7.4 --, que hasta aquí ningún test podía producir
+// porque un archivo nacía duradero. Viene apagado: encenderlo cambia lo que sobrevive a una
+// caída, y el barrido de la sec. 9.2 está calibrado sin él.
 package fsxtest
 
 import (
@@ -87,6 +94,16 @@ type Disco struct {
 	// F4) cada WriteAt se aplica al vuelo y el Disco es un observador simple.
 	Volatil bool
 
+	// DirVolatil lleva lo mismo a las entradas de directorio: con él en true, la creación y
+	// el borrado de un archivo no son duraderos hasta Disco.Sync(). Es independiente de
+	// Volatil -- una cosa es el contenido y otra la entrada -- y viene apagado.
+	DirVolatil bool
+
+	// borrados son los archivos que Remove ya quitó de la vista del proceso y cuyo borrado
+	// todavía no pasó por el fsync del directorio: si la caída llega antes, resucitan con
+	// los bytes que eran duraderos. Solo se usa con DirVolatil en true.
+	borrados map[string]*Archivo
+
 	// pendientes es la cola global de escrituras sin sincronizar, en orden de emisión.
 	// Solo se usa con Volatil en true.
 	pendientes []escritura
@@ -101,6 +118,22 @@ type Disco struct {
 	// Volatil.
 	CaeEn int
 
+	// CaeEnEventos, si no está vacío, es una secuencia de eventos de la traza tras la cual el
+	// disco cae: al anotarse el último, habiendo ocurrido los anteriores en ese orden, se
+	// procesa la cola igual que con CaeEn.
+	//
+	// Existe porque CaeEn cuenta WriteAt y hay cortes que no caen en ninguno: el de la fila
+	// 5a ocurre entre el create del log nuevo y el fsync del directorio, y ahí no se escribe
+	// un solo byte. Es una secuencia y no un evento suelto porque los que interesan no son
+	// únicos -- "dir:sync" ocurre dos veces por rotación --, así que hace falta decir cuál.
+	//
+	// El evento marca el **comienzo** del efecto de la operación: caer en él significa que
+	// esa operación no llegó a surtir efecto, y quien la pidió recibe ErrCaido.
+	CaeEnEventos []string
+
+	// vistos es cuántos elementos de CaeEnEventos van casados.
+	vistos int
+
 	// Semilla fija el azar del descarte, el reordenamiento y el desgarro. La misma semilla
 	// con la misma CaeEn y la misma carga reproduce la caída bit a bit (sec. 9.1).
 	Semilla int64
@@ -111,20 +144,51 @@ type Disco struct {
 
 // Nuevo devuelve un Disco vacío con su traza.
 func Nuevo() *Disco {
-	return &Disco{Traza: &Traza{}, archivos: make(map[string]*Archivo)}
+	return &Disco{
+		Traza:    &Traza{},
+		archivos: make(map[string]*Archivo),
+		borrados: make(map[string]*Archivo),
+	}
+}
+
+// evento anota e en la traza y, si con él se completa la secuencia de CaeEnEventos, hace
+// caer el disco justo ahí. El llamador comprueba d.Caido y devuelve ErrCaido: la operación
+// que disparó la caída no surte efecto.
+func (d *Disco) evento(formato string, args ...any) {
+	e := fmt.Sprintf(formato, args...)
+	d.Traza.Anota("%s", e)
+	if d.Caido || d.vistos >= len(d.CaeEnEventos) || e != d.CaeEnEventos[d.vistos] {
+		return
+	}
+	d.vistos++
+	if d.vistos == len(d.CaeEnEventos) {
+		d.cae()
+	}
 }
 
 // Open abre el archivo nombre, creándolo vacío si no existe. Devuelve siempre el mismo
 // objeto para el mismo nombre: dos handles con contenidos distintos para el mismo archivo
 // no es lo que hace un sistema de archivos.
 func (d *Disco) Open(nombre string) (fsx.File, error) {
+	if d.Caido {
+		return nil, ErrCaido
+	}
 	if a, ok := d.archivos[nombre]; ok {
-		d.Traza.Anota("%s:open", nombre)
+		d.evento("%s:open", nombre)
+		if d.Caido {
+			return nil, ErrCaido
+		}
 		return a, nil
 	}
-	a := &Archivo{nombre: nombre, disco: d}
+	a := &Archivo{nombre: nombre, disco: d, creacionPendiente: d.DirVolatil}
 	d.archivos[nombre] = a
-	d.Traza.Anota("%s:create", nombre)
+	// Crear de nuevo un nombre cuyo borrado seguía pendiente cancela la resurrección: la
+	// entrada pasa a nombrar a este archivo, que es lo último que se pidió sobre ella.
+	delete(d.borrados, nombre)
+	d.evento("%s:create", nombre)
+	if d.Caido {
+		return nil, ErrCaido
+	}
 	return a, nil
 }
 
@@ -133,24 +197,62 @@ func (d *Disco) Remove(nombre string) error {
 	if d.Caido {
 		return ErrCaido
 	}
-	if _, ok := d.archivos[nombre]; !ok {
+	a, ok := d.archivos[nombre]
+	if !ok {
 		return fmt.Errorf("fsxtest: %s no existe", nombre)
 	}
 	delete(d.archivos, nombre)
 	d.pendientes = slices.DeleteFunc(d.pendientes, func(e escritura) bool {
 		return e.archivo == nombre
 	})
-	d.Traza.Anota("%s:remove", nombre)
+	// Un borrado sin fsync del directorio puede no llegar al plato. Se guarda para que la
+	// caída decida, salvo que la creación tampoco fuera duradera: entonces la entrada nunca
+	// existió en el disco y no hay nada que deshacer.
+	if d.DirVolatil && !a.creacionPendiente {
+		d.borrados[nombre] = a
+	}
+	d.evento("%s:remove", nombre)
+	if d.Caido {
+		return ErrCaido
+	}
 	return nil
 }
 
-// Sync anota el fsync del directorio.
+// Sync es el fsync del directorio: lo que hace duraderas las **entradas**, no los
+// contenidos. Las creaciones dejan de estar pendientes y los borrados dejan de poder
+// deshacerse.
 func (d *Disco) Sync() error {
 	if d.Caido {
 		return ErrCaido
 	}
-	d.Traza.Anota("dir:sync")
-	return d.SyncFalla
+	d.evento("dir:sync")
+	if d.Caido {
+		return ErrCaido
+	}
+	if d.SyncFalla != nil {
+		// Un fsync que falla no promete nada: las entradas siguen pendientes.
+		return d.SyncFalla
+	}
+	for _, a := range d.archivos {
+		a.creacionPendiente = false
+	}
+	clear(d.borrados)
+	return nil
+}
+
+// EntradaDuradera informa si la entrada de directorio de nombre sobreviviría a una caída:
+// el archivo existe y su creación ya pasó por un fsync del directorio. Con DirVolatil
+// apagado, toda entrada existente es duradera.
+func (d *Disco) EntradaDuradera(nombre string) bool {
+	a, ok := d.archivos[nombre]
+	return ok && !a.creacionPendiente
+}
+
+// BorradoPendiente informa si el borrado de nombre todavía no es duradero, de modo que una
+// caída podría devolver el archivo al directorio.
+func (d *Disco) BorradoPendiente(nombre string) bool {
+	_, ok := d.borrados[nombre]
+	return ok
 }
 
 // Existe informa si el archivo está en el directorio.
@@ -159,9 +261,27 @@ func (d *Disco) Existe(nombre string) bool {
 	return ok
 }
 
-// Nombres devuelve los archivos del directorio, ordenados.
+// Nombres devuelve los archivos del directorio, ordenados. Es la vista del **proceso**: un
+// archivo recién creado se ve aunque su entrada no sea duradera todavía, y uno recién
+// borrado no se ve aunque el borrado pueda deshacerse en una caída.
 func (d *Disco) Nombres() []string {
 	return slices.Sorted(maps.Keys(d.archivos))
+}
+
+// NombresDuraderos es la vista del **disco**: los archivos cuya entrada de directorio
+// sobreviviría a una caída ahora mismo. Con DirVolatil apagado coincide con Nombres.
+func (d *Disco) NombresDuraderos() []string {
+	out := make([]string, 0, len(d.archivos)+len(d.borrados))
+	for nombre, a := range d.archivos {
+		if !a.creacionPendiente {
+			out = append(out, nombre)
+		}
+	}
+	for nombre := range d.borrados {
+		out = append(out, nombre)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // Listar es Nombres con la firma de fsx.Dir.
@@ -179,6 +299,18 @@ func (d *Disco) Bytes(nombre string) []byte {
 		return nil
 	}
 	return slices.Clone(a.datos)
+}
+
+// bytesDe es Bytes contando también los archivos con el borrado pendiente, que Reabrir
+// puede tener que resucitar.
+func (d *Disco) bytesDe(nombre string) []byte {
+	if b := d.Bytes(nombre); b != nil {
+		return b
+	}
+	if a, ok := d.borrados[nombre]; ok {
+		return slices.Clone(a.datos)
+	}
+	return nil
 }
 
 // Tamano es el tamano duradero de un archivo, o -1 si no existe.
@@ -232,11 +364,16 @@ func (d *Disco) sincroniza(nombre string) {
 // una caída ahora mismo. Es lo que ve un proceso que arranca sobre el disco que dejó el
 // anterior al morir. Un archivo que existe pero está vacío se recrea vacío: su existencia
 // es un dato que la recuperación lee (paso 1 de la sec. 8).
+//
+// Las entradas de directorio siguen el mismo criterio que los bytes: una creación que no
+// pasó por el fsync del directorio no se hereda, y un borrado que tampoco pasó se deshace.
+// Tras una caída eso no decide nada -- cae() ya dejó el directorio en su estado duradero --,
+// y solo se nota al reabrir sobre un Disco que no llegó a caer.
 func (d *Disco) Reabrir() *Disco {
 	n := Nuevo()
-	for _, nombre := range d.Nombres() {
+	for _, nombre := range d.NombresDuraderos() {
 		f, _ := n.Open(nombre)
-		if b := d.Bytes(nombre); len(b) > 0 {
+		if b := d.bytesDe(nombre); len(b) > 0 {
 			f.WriteAt(b, 0)
 		}
 	}
@@ -251,6 +388,9 @@ type Archivo struct {
 	// Cerrado se pone a true en Close. Un archivo cerrado sigue legible desde el Disco:
 	// lo que interesa comprobar es que el WAL cierra el que deja atrás, no impedirlo.
 	Cerrado bool
+	// creacionPendiente es true entre el Open que creó el archivo y el primer fsync del
+	// directorio. Solo lo pone DirVolatil.
+	creacionPendiente bool
 }
 
 // visible es el contenido que ve el proceso: el duradero con las pendientes de este
@@ -298,7 +438,10 @@ func (a *Archivo) WriteAt(p []byte, off int64) (int, error) {
 	a.disco.nEscrituras++
 	e := escritura{archivo: a.nombre, off: off, datos: slices.Clone(p)}
 	a.disco.pendientes = append(a.disco.pendientes, e)
-	a.disco.Traza.Anota("%s:write %d+%d", a.nombre, off, len(p))
+	a.disco.evento("%s:write %d+%d", a.nombre, off, len(p))
+	if a.disco.Caido {
+		return 0, ErrCaido
+	}
 	if a.disco.CaeEn > 0 && a.disco.nEscrituras >= a.disco.CaeEn {
 		a.disco.cae()
 		return 0, ErrCaido
@@ -313,7 +456,10 @@ func (a *Archivo) Sync() error {
 	if a.disco.Caido {
 		return ErrCaido
 	}
-	a.disco.Traza.Anota("%s:sync", a.nombre)
+	a.disco.evento("%s:sync", a.nombre)
+	if a.disco.Caido {
+		return ErrCaido
+	}
 	a.disco.sincroniza(a.nombre)
 	return nil
 }

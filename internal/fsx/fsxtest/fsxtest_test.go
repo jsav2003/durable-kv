@@ -1,6 +1,7 @@
 package fsxtest_test
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -155,5 +156,103 @@ func TestTruncateEnAmbasDirecciones(t *testing.T) {
 	f.Truncate(5)
 	if got := d.Bytes("f"); string(got) != "abc\x00\x00" {
 		t.Errorf("contenido = %q, quiero \"abc\x00\x00\"", got)
+	}
+}
+
+// Con DirVolatil, un archivo recién creado existe para el proceso pero su entrada de
+// directorio todavía no es duradera: es la ventana de la fila 5a, entre el Open de la
+// generación nueva del WAL y el fsync del directorio de la rotación (sec. 7.4).
+func TestDirVolatilLaCreacionNoEsDuraderaHastaElSync(t *testing.T) {
+	d := fsxtest.Nuevo()
+	d.DirVolatil = true
+
+	d.Open("datos.wal.1")
+
+	if !d.Existe("datos.wal.1") {
+		t.Error("el proceso que acaba de crear el archivo no lo ve")
+	}
+	if d.EntradaDuradera("datos.wal.1") {
+		t.Error("la entrada es duradera sin el fsync del directorio")
+	}
+	if got := d.NombresDuraderos(); len(got) != 0 {
+		t.Errorf("nombres duraderos = %v, quiero ninguno", got)
+	}
+
+	d.Sync()
+
+	if !d.EntradaDuradera("datos.wal.1") {
+		t.Error("la entrada sigue pendiente tras el fsync del directorio")
+	}
+}
+
+// Y al revés: un borrado tampoco es duradero hasta el fsync del directorio, así que una
+// caída puede devolver el archivo -- con los bytes que ya eran duraderos. Es la otra mitad
+// de la rotación: el corte de la fila 5b.
+func TestDirVolatilElBorradoNoEsDuraderoHastaElSync(t *testing.T) {
+	d := fsxtest.Nuevo()
+	d.DirVolatil = true
+	f, _ := d.Open("datos.wal.0")
+	f.WriteAt([]byte("registro"), 0)
+	d.Sync()
+
+	d.Remove("datos.wal.0")
+
+	if d.Existe("datos.wal.0") {
+		t.Error("el proceso que acaba de borrar el archivo todavía lo ve")
+	}
+	if !d.BorradoPendiente("datos.wal.0") {
+		t.Error("el borrado se dio por duradero sin el fsync del directorio")
+	}
+	// Un proceso que arranca ahora encuentra el archivo: el borrado no llegó al plato.
+	n := d.Reabrir()
+	if !n.Existe("datos.wal.0") {
+		t.Fatal("el archivo no resucitó al reabrir: el borrado no era duradero")
+	}
+	if got := n.Bytes("datos.wal.0"); string(got) != "registro" {
+		t.Errorf("el resucitado trae %q, quiero \"registro\"", got)
+	}
+
+	d.Sync()
+
+	if d.BorradoPendiente("datos.wal.0") {
+		t.Error("el borrado sigue pendiente tras el fsync del directorio")
+	}
+	if d.Reabrir().Existe("datos.wal.0") {
+		t.Error("el archivo resucita tras un borrado ya duradero")
+	}
+}
+
+// Sin DirVolatil nada de lo anterior ocurre: un archivo nace duradero y un borrado no se
+// deshace. Es el modo en que corre el barrido de la sec. 9.2.
+func TestSinDirVolatilLaEntradaNaceDuradera(t *testing.T) {
+	d := fsxtest.Nuevo()
+
+	d.Open("datos.wal.1")
+
+	if !d.EntradaDuradera("datos.wal.1") {
+		t.Error("la entrada no es duradera sin haber encendido DirVolatil")
+	}
+	if !d.Reabrir().Existe("datos.wal.1") {
+		t.Error("el archivo no sobrevivió a la reapertura")
+	}
+	d.Remove("datos.wal.1")
+	if d.BorradoPendiente("datos.wal.1") {
+		t.Error("el borrado quedó pendiente sin haber encendido DirVolatil")
+	}
+}
+
+// Un fsync de directorio que falla no promete nada, así que las entradas siguen pendientes.
+// Importa porque el no-op de Windows (D10) se modela justamente con SyncFalla.
+func TestDirVolatilConElSyncEnFalloLaEntradaSiguePendiente(t *testing.T) {
+	d := fsxtest.Nuevo()
+	d.DirVolatil = true
+	d.SyncFalla = errors.New("el fsync de directorio no existe aqui")
+
+	d.Open("datos.wal.1")
+	if err := d.Sync(); err == nil {
+		t.Fatal("dir.Sync devolvió nil con SyncFalla puesto")
+	}
+	if d.EntradaDuradera("datos.wal.1") {
+		t.Error("la entrada se dio por duradera con el fsync del directorio en fallo")
 	}
 }

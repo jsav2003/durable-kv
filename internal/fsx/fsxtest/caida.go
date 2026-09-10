@@ -2,7 +2,9 @@ package fsxtest
 
 import (
 	"errors"
+	"maps"
 	"math/rand"
+	"slices"
 )
 
 // ErrCaido lo devuelve toda operación de E/S sobre un Disco que ya cayó. Un proceso al que
@@ -21,6 +23,8 @@ var ErrCaido = errors.New("fsxtest: el disco cayo")
 //  3. Una de las supervivientes se aplica solo hasta un límite de sector (512 B): es la
 //     escritura desgarrada, lo que ocurre cuando la atomicidad solo se garantiza por
 //     sector y la caída parte una página por la mitad.
+//  4. Con DirVolatil, decide además qué entradas de directorio sin fsync llegaron al plato:
+//     una creación puede no existir, y un borrado puede no haber ocurrido.
 //
 // Todo el azar sale de un rand sembrado con d.Semilla, así que la misma semilla con la
 // misma CaeEn y la misma carga reproduce el estado en disco bit a bit.
@@ -55,8 +59,51 @@ func (d *Disco) cae() {
 		d.aplica(e)
 	}
 
+	// 4. las entradas de directorio sin fsync
+	d.caenLasEntradas(r)
+
 	d.Traza.Anota("CAIDA en escritura %d (semilla %d, %d de %d pendientes sobreviven)",
 		d.nEscrituras, d.Semilla, len(viven), len(cola))
+}
+
+// caenLasEntradas decide qué creaciones y qué borrados sin fsync del directorio llegaron al
+// plato. Un archivo creado y no sincronizado puede no existir tras la caída; un archivo
+// borrado y no sincronizado puede seguir ahí.
+//
+// Va al final de cae() a propósito. Los números que consumen el descarte, el reordenamiento
+// y el desgarro salen del mismo r, así que tomar aquí los primeros habría corrido el flujo y
+// cambiado el estado que produce cada semilla del barrido de la sec. 9.2 -- que es
+// exactamente lo que este modo no puede hacer. Con DirVolatil apagado, o sin entradas
+// pendientes, no se toca r ni una vez.
+func (d *Disco) caenLasEntradas(r *rand.Rand) {
+	if !d.DirVolatil {
+		return
+	}
+	// El recorrido va por nombre ordenado y no por el mapa: el orden de un mapa en Go es
+	// aleatorio, y con él la misma semilla dejaría un directorio distinto en cada corrida.
+	for _, nombre := range slices.Sorted(maps.Keys(d.archivos)) {
+		a := d.archivos[nombre]
+		if !a.creacionPendiente {
+			continue
+		}
+		if r.Intn(2) == 0 {
+			// La creación no llegó al disco: el archivo no existe, y con él se van las
+			// escrituras que acabaran de aplicársele.
+			delete(d.archivos, nombre)
+			d.Traza.Anota("CAIDA se pierde la creacion de %s", nombre)
+			continue
+		}
+		a.creacionPendiente = false
+	}
+	for _, nombre := range slices.Sorted(maps.Keys(d.borrados)) {
+		if r.Intn(2) == 0 {
+			a := d.borrados[nombre]
+			a.creacionPendiente = false
+			d.archivos[nombre] = a
+			d.Traza.Anota("CAIDA se deshace el borrado de %s", nombre)
+		}
+	}
+	clear(d.borrados)
 }
 
 // sector es la unidad de atomicidad que un disco garantiza. Una escritura de varios

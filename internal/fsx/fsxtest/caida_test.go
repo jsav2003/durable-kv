@@ -3,6 +3,7 @@ package fsxtest_test
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/jsav2003/motor-almacenamiento/internal/fsx"
@@ -60,17 +61,27 @@ func TestCaidaEsReproducibleConLaMismaSemilla(t *testing.T) {
 }
 
 // Tras la caída toda operación de E/S devuelve ErrCaido: el proceso está muerto.
+//
+// Incluidas las de directorio. El handle se toma **antes** de la caída porque después ni
+// siquiera se puede abrir un archivo: un proceso al que matan no hace una llamada al
+// sistema más.
 func TestTrasLaCaidaTodoDevuelveErrCaido(t *testing.T) {
 	d := fsxtest.Nuevo()
 	d.Volatil = true
 	d.CaeEn = 3
 	d.Semilla = 7
+	f, _ := d.Open("datos.db")
 	carga(d)
 
 	if !d.Caido {
 		t.Fatal("el disco no se marcó como caído")
 	}
-	f, _ := d.Open("datos.db")
+	if _, err := d.Open("cualquiera"); !errors.Is(err, fsxtest.ErrCaido) {
+		t.Errorf("Open tras la caída: %v, quiero ErrCaido", err)
+	}
+	if err := d.Remove("datos.db"); !errors.Is(err, fsxtest.ErrCaido) {
+		t.Errorf("Remove tras la caída: %v, quiero ErrCaido", err)
+	}
 	if _, err := f.WriteAt([]byte("x"), 0); !errors.Is(err, fsxtest.ErrCaido) {
 		t.Errorf("WriteAt tras la caída: %v, quiero ErrCaido", err)
 	}
@@ -142,5 +153,119 @@ func TestElDesgarroEsEnFronteraDeSector(t *testing.T) {
 	if perdidas == 0 || partidas == 0 {
 		t.Errorf("en %d semillas no se ejercieron las tres ramas: perdidas=%d enteras=%d partidas=%d",
 			vistas, perdidas, enteras, partidas)
+	}
+}
+
+// CaeEnEventos es el segundo disparador de la caída, y existe porque CaeEn cuenta WriteAt:
+// entre el create del log nuevo y el fsync del directorio no se escribe un solo byte, así
+// que el corte de la fila 5a no se puede pedir por número de escritura.
+//
+// La secuencia importa: "dir:sync" ocurre dos veces por rotación y el que interesa es el
+// primero **después** de crear la generación nueva.
+func TestCaeEnEventosCortaJustoDespuesDelEvento(t *testing.T) {
+	d := fsxtest.Nuevo()
+	d.Volatil = true
+	d.DirVolatil = true
+	d.Semilla = 3
+	d.CaeEnEventos = []string{"datos.wal.1:create", "dir:sync"}
+
+	datos, _ := d.Open("datos.db")
+	d.Sync()
+	datos.WriteAt(bytes.Repeat([]byte{'A'}, 4096), 0)
+	datos.Sync()
+
+	if d.Caido {
+		t.Fatal("el disco cayó antes de la secuencia")
+	}
+	if _, err := d.Open("datos.wal.1"); err != nil {
+		t.Fatalf("el create no debía caer, es el primero de la secuencia: %v", err)
+	}
+	if d.Caido {
+		t.Fatal("el disco cayó en el primer evento de la secuencia y no en el último")
+	}
+
+	if err := d.Sync(); !errors.Is(err, fsxtest.ErrCaido) {
+		t.Fatalf("dir.Sync = %v, quiero ErrCaido: es el último de la secuencia", err)
+	}
+	if !d.Caido {
+		t.Fatal("el disco no cayó al completarse la secuencia")
+	}
+	// El fsync del directorio no llegó a surtir efecto: la creación quedó a merced de la
+	// caída, y datos.db, que sí tenía su fsync, sigue entero.
+	if got := d.Bytes("datos.db"); len(got) != 4096 {
+		t.Errorf("datos.db duradero mide %d, quiero 4096: su Sync fue anterior", len(got))
+	}
+}
+
+// Las entradas de directorio que la caída decide salen del mismo rand sembrado que el
+// descarte, así que la misma semilla deja el mismo directorio. Sin esto BUGS.md no puede
+// citar un caso (sec. 9.1).
+func TestLasEntradasPendientesSonReproduciblesConLaMismaSemilla(t *testing.T) {
+	corre := func(semilla int64) []string {
+		d := fsxtest.Nuevo()
+		d.Volatil = true
+		d.DirVolatil = true
+		d.Semilla = semilla
+		d.CaeEnEventos = []string{"dir:sync"}
+
+		d.Open("datos.db")
+		d.Open("datos.wal.0")
+		d.Open("datos.wal.1")
+		d.Sync()
+		return d.NombresDuraderos()
+	}
+
+	a, b := corre(11), corre(11)
+	if !slices.Equal(a, b) {
+		t.Errorf("dos corridas con la semilla 11 dejan %v y %v", a, b)
+	}
+	// Y la decisión es de verdad una decisión: hay semillas que dejan directorios distintos.
+	distinta := false
+	for s := int64(0); s < 20 && !distinta; s++ {
+		distinta = !slices.Equal(corre(s), a)
+	}
+	if !distinta {
+		t.Error("ninguna de veinte semillas cambia qué entradas sobreviven: no se está decidiendo nada")
+	}
+}
+
+// Una creación que la caída descarta se lleva por delante las escrituras al archivo, aunque
+// hubieran sobrevivido: el archivo no existe.
+func TestLaCreacionDescartadaSeLlevaSusEscrituras(t *testing.T) {
+	// La semilla se elige para que la creación no sobreviva; el bucle la busca en vez de
+	// fijar un número mágico que un cambio del arnés dejaría mintiendo.
+	var semilla int64 = -1
+	for s := int64(0); s < 50; s++ {
+		d := fsxtest.Nuevo()
+		d.Volatil = true
+		d.DirVolatil = true
+		d.Semilla = s
+		d.CaeEnEventos = []string{"datos.wal.1:sync"}
+		f, _ := d.Open("datos.wal.1")
+		f.WriteAt([]byte("registro"), 0)
+		f.Sync()
+		if !d.Existe("datos.wal.1") {
+			semilla = s
+			break
+		}
+	}
+	if semilla < 0 {
+		t.Fatal("ninguna de cincuenta semillas descarta la creación")
+	}
+
+	d := fsxtest.Nuevo()
+	d.Volatil = true
+	d.DirVolatil = true
+	d.Semilla = semilla
+	d.CaeEnEventos = []string{"datos.wal.1:sync"}
+	f, _ := d.Open("datos.wal.1")
+	f.WriteAt([]byte("registro"), 0)
+	f.Sync()
+
+	if d.Existe("datos.wal.1") {
+		t.Fatalf("con la semilla %d la creación sobrevivió, y se eligió por lo contrario", semilla)
+	}
+	if n := d.Reabrir(); n.Existe("datos.wal.1") {
+		t.Errorf("el archivo reaparece al reabrir con %q", n.Bytes("datos.wal.1"))
 	}
 }
